@@ -1,0 +1,10 @@
+{
+  "description": "MCP Sentinel enhances AI agent security by verifying tool requests and enforcing authorization policies, ensuring safe and trusted operations for developers.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
