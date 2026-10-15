@@ -36,7 +36,7 @@ export function Philosophy() {
         >
           <Icon name="scan" />
           <p>
-            <b>Prototype scope</b>The fintech ledger and operational data shown
+            <b>Prototype scope</b> — The fintech ledger and operational data shown
             here are simulated. Production use would require additional threat
             modeling, security validation, and operational controls.
           </p>

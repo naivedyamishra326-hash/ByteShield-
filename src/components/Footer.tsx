@@ -28,18 +28,68 @@ export function Footer({ onNavigate }: FooterProps) {
 
         <div>
           <span>EXPLORE</span>
-          <a href="#pipeline">Platform</a>
-          <a href="#architecture">Architecture</a>
-          <a href="#research">Research</a>
+          <a
+            href="#pipeline"
+            onClick={(e) => {
+              if (onNavigate) {
+                e.preventDefault()
+                onNavigate("#pipeline")
+              }
+            }}
+          >
+            Platform
+          </a>
+          <a
+            href="#architecture"
+            onClick={(e) => {
+              if (onNavigate) {
+                e.preventDefault()
+                onNavigate("#architecture")
+              }
+            }}
+          >
+            Architecture
+          </a>
+          <a
+            href="#about"
+            onClick={(e) => {
+              if (onNavigate) {
+                e.preventDefault()
+                onNavigate("#about")
+              }
+            }}
+          >
+            Research
+          </a>
         </div>
 
         <div>
           <span>PRODUCT</span>
-          <a href="#preview">Product preview</a>
+          <a
+            href="#preview"
+            onClick={(e) => {
+              if (onNavigate) {
+                e.preventDefault()
+                onNavigate("#preview")
+              }
+            }}
+          >
+            Product preview
+          </a>
           <a href="/console" onClick={handleConsoleClick}>
             Security console
           </a>
-          <a href="#top">Return to top</a>
+          <a
+            href="#top"
+            onClick={(e) => {
+              if (onNavigate) {
+                e.preventDefault()
+                onNavigate("#top")
+              }
+            }}
+          >
+            Return to top
+          </a>
         </div>
 
         <div className="footer-status">

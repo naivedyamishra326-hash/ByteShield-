@@ -87,17 +87,31 @@ export function ProductPreview({ onNavigate }: ProductPreviewProps) {
             <span />
             <b>MS</b>
           </div>
-          {[0, 1, 2, 3, 4, 5].map((i) => {
+          {previews.map((tab, i) => {
             const iconNames: IconName[] = [
               "grid",
               "spark",
               "eye",
               "scan",
               "audit",
-              "policy",
             ]
             return (
-              <i className={i === active ? "active" : ""} key={i}>
+              <i
+                className={i === active ? "active" : ""}
+                key={tab}
+                role="button"
+                tabIndex={0}
+                style={{ cursor: "pointer" }}
+                onClick={() => setActive(i)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault()
+                    setActive(i)
+                  }
+                }}
+                title={tab}
+                aria-label={tab}
+              >
                 <Icon name={iconNames[i]} />
               </i>
             )

@@ -23,7 +23,7 @@ export function Hero({ onNavigate }: HeroProps) {
   }
 
   return (
-    <section className="hero" ref={heroRef}>
+    <section className="hero" id="top" ref={heroRef}>
       <div className="hero-grid" />
       <motion.div
         className="hero-glow"

@@ -78,3 +78,5 @@ export function ConsoleGateway({ onNavigate }: ConsoleGatewayProps) {
     </motion.main>
   )
 }
+
+export default ConsoleGateway

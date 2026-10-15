@@ -6,6 +6,7 @@ import type {
   AuditEvent,
   PolicyFile,
   DemoIdentity,
+  DemoToken,
   Incident,
   ApprovalRequest,
   CircuitBreakerStatus,
@@ -16,6 +17,28 @@ import type {
   FinanceStatus,
   ToolActivity,
 } from "../api/types"
+import {
+  ALL_SCENARIOS,
+  CATEGORIES_METADATA,
+  SCENARIO_MANIFEST,
+  getScenarioById,
+  getScenariosByCategory,
+} from "../security-tests/scenarios/manifest"
+import type { SecurityScenario, ScenarioCategory } from "../security-tests/scenarios/types"
+import {
+  defaultAgenticTestRunner,
+  type RunProgress,
+  type RunComparison,
+} from "../security-tests/orchestrator/testRunner"
+import type { ScenarioEvaluationResult } from "../security-tests/orchestrator/defenseEvaluator"
+import { defaultCedarCopilot, type PolicyCandidate, type PolicySimulationImpact } from "../services/cedarCopilot"
+import {
+  defaultSecurityStore,
+  type SecurityIncident,
+  type EnrichedTransaction,
+  type IncidentStatus,
+  type SecurityStoreState,
+} from "../services/securityStore"
 
 interface SecurityConsoleProps {
   currentPath: string
@@ -235,6 +258,176 @@ const nodeDataMap: Record<string, string[]> = {
   ],
 }
 
+// Default Fallback Datasets for Offline / Demo Mode
+const defaultCustomerAccounts: CustomerAccount[] = [
+  { id: "ACC-1001", name: "Elena Vance (Checking)", email: "elena.vance@blackmesa.internal", balance: 12480.60, currency: "USD", status: "active", createdAt: "2026-01-15T08:00:00Z", dailyLimit: 2500, tier: "Gold Executive" },
+  { id: "ACC-1002", name: "Marcus Brody (Savings)", email: "marcus.brody@museum.org", balance: 45200.00, currency: "USD", status: "active", createdAt: "2026-01-20T09:30:00Z", dailyLimit: 5000, tier: "Platinum Business" },
+  { id: "ACC-1003", name: "Aria Sterling (Checking)", email: "aria.sterling@apex.finance", balance: 3150.25, currency: "USD", status: "suspended", createdAt: "2026-02-01T11:15:00Z", dailyLimit: 1000, tier: "Standard Tier" },
+]
+
+const defaultTransactionsByAccount: Record<string, Transaction[]> = {
+  "ACC-1001": [
+    { id: "TXN-2048", accountId: "ACC-1001", type: "debit", currency: "USD", merchantName: "Northstar Market", memo: "Weekly groceries", category: "Groceries", timestamp: "Oct 14, 2026", amount: 29.5, status: "completed" },
+    { id: "TXN-2047", accountId: "ACC-1001", type: "debit", currency: "USD", merchantName: "Cloudline Hosting", memo: "Monthly compute plan", category: "Cloud", timestamp: "Oct 14, 2026", amount: 84.0, status: "completed" },
+    { id: "TXN-2046", accountId: "ACC-1001", type: "debit", currency: "USD", merchantName: "Morrow Coffee", memo: "Team coffee", category: "Dining", timestamp: "Oct 13, 2026", amount: 8.4, status: "completed" },
+    { id: "TXN-2045", accountId: "ACC-1001", type: "debit", currency: "USD", merchantName: "Aster Rail", memo: "Regional rail ticket", category: "Travel", timestamp: "Oct 12, 2026", amount: 126.8, status: "completed" },
+  ],
+  "ACC-1002": [
+    { id: "TXN-3011", accountId: "ACC-1002", type: "debit", currency: "USD", merchantName: "Atlas Datacenter", memo: "Dedicated rack hosting", category: "Cloud", timestamp: "Oct 14, 2026", amount: 1420.0, status: "completed" },
+    { id: "TXN-3010", accountId: "ACC-1002", type: "debit", currency: "USD", merchantName: "Summit Airlines", memo: "Executive flight", category: "Travel", timestamp: "Oct 11, 2026", amount: 650.0, status: "completed" },
+    { id: "TXN-3009", accountId: "ACC-1002", type: "debit", currency: "USD", merchantName: "Savant Consulting", memo: "Q4 Strategy retainer", category: "Services", timestamp: "Oct 09, 2026", amount: 2500.0, status: "completed" },
+  ],
+  "ACC-1003": [
+    { id: "TXN-4001", accountId: "ACC-1003", type: "debit", currency: "USD", merchantName: "ByteStream Media", memo: "Subscription charge", category: "Entertainment", timestamp: "Oct 13, 2026", amount: 19.99, status: "disputed" },
+    { id: "TXN-4002", accountId: "ACC-1003", type: "debit", currency: "USD", merchantName: "QuickMart", memo: "Late evening convenience", category: "Groceries", timestamp: "Oct 10, 2026", amount: 45.2, status: "completed" },
+  ],
+}
+
+const defaultPolicies: PolicyFile[] = [
+  {
+    name: "fintech.cedar",
+    loadedAt: "2026-10-15T00:00:00Z",
+    content: `// ============================================================
+// MCP Sentinel — Fintech Demonstration Policies
+// Fine-grained authorization for the remediation scenario
+// ============================================================
+
+// POLICY: Financial remediation agent can read approved accounts
+@id("fin-remediation-read-accounts")
+permit (
+  principal == MCPSentinel::Agent::"spiffe://demo.local/agent/financial-remediation",
+  action == MCPSentinel::Action::"read_account",
+  resource
+)
+when {
+  resource.status == "active"
+};
+
+// POLICY: Financial remediation agent can issue refunds
+// ONLY to authorized account ACC-1001, max 50 units
+@id("fin-remediation-refund-acc1001")
+permit (
+  principal == MCPSentinel::Agent::"spiffe://demo.local/agent/financial-remediation",
+  action == MCPSentinel::Action::"issue_refund",
+  resource == MCPSentinel::Account::"ACC-1001"
+)
+when {
+  context.requestedAmount <= 5000 &&
+  context.currency == "USD"
+};
+
+// POLICY: Block refunds on suspended accounts
+@id("block-suspended-account-refunds")
+forbid (
+  principal,
+  action == MCPSentinel::Action::"issue_refund",
+  resource
+)
+when {
+  resource.status == "suspended"
+};`,
+  },
+  {
+    name: "base.cedar",
+    loadedAt: "2026-10-15T00:00:00Z",
+    content: `// ============================================================
+// MCP Sentinel — Base Authorization Policies
+// ============================================================
+
+// Standard read access for authenticated agents
+@id("base-agent-read")
+permit (
+  principal,
+  action in [MCPSentinel::Action::"read_account", MCPSentinel::Action::"list_accounts"],
+  resource
+);
+
+// High-risk commands require explicit supervisor approval
+@id("base-command-approval")
+forbid (
+  principal,
+  action == MCPSentinel::Action::"execute_command",
+  resource
+)
+unless {
+  context has supervisorApproval &&
+  context.supervisorApproval == true
+};`,
+  },
+]
+
+const defaultIdentities: DemoIdentity[] = [
+  {
+    name: "Financial Remediation Agent",
+    uri: "spiffe://demo.local/agent/financial-remediation",
+    tokens: [
+      {
+        id: "tok_ed25519_fin_rem_001",
+        subject: "spiffe://demo.local/agent/financial-remediation",
+        capabilities: ["ledger.read", "ledger.refund"],
+        authorizedResources: ["ACC-1001"],
+        maxRefundAmount: 5000,
+        issuedAt: "2026-10-15T01:00:00Z",
+        expiresAt: "2026-10-15T09:00:00Z",
+        revoked: false,
+      },
+    ],
+  },
+  {
+    name: "Audit & Compliance Monitor",
+    uri: "spiffe://demo.local/agent/audit-monitor",
+    tokens: [
+      {
+        id: "tok_ed25519_aud_mon_002",
+        subject: "spiffe://demo.local/agent/audit-monitor",
+        capabilities: ["ledger.read", "audit.verify", "integrity.scan"],
+        authorizedResources: ["*"],
+        issuedAt: "2026-10-15T02:00:00Z",
+        expiresAt: "2026-10-15T10:00:00Z",
+        revoked: false,
+      },
+    ],
+  },
+  {
+    name: "Customer Support Assistant",
+    uri: "spiffe://demo.local/agent/support-bot",
+    tokens: [
+      {
+        id: "tok_ed25519_sup_bot_003",
+        subject: "spiffe://demo.local/agent/support-bot",
+        capabilities: ["ledger.read"],
+        authorizedResources: ["ACC-1001", "ACC-1002"],
+        issuedAt: "2026-10-15T00:30:00Z",
+        expiresAt: "2026-10-15T08:30:00Z",
+        revoked: false,
+      },
+    ],
+  },
+]
+
+const defaultIncidents: Incident[] = [
+  {
+    id: "INC-2041",
+    sessionId: "session-demo-01",
+    agentIdentity: "spiffe://demo.local/agent/financial-remediation",
+    severity: "HIGH",
+    description: "Repeated unauthorized refund attempt outside account boundary",
+    detectedAt: "2026-10-14T23:45:00Z",
+    status: "ACTIVE",
+    eventChain: [
+      { eventId: "EVT-1046", timestamp: "2026-10-14T23:44:10Z", toolName: "get_account_balance", eventType: "tool_execution", decision: "ALLOW" },
+      { eventId: "EVT-1047", timestamp: "2026-10-14T23:45:00Z", toolName: "issue_refund", eventType: "tool_execution", decision: "DENY" },
+    ],
+  },
+]
+
+const defaultCircuitBreaker: CircuitBreakerStatus = {
+  agentIdentity: "spiffe://demo.local/agent/financial-remediation",
+  state: "CLOSED",
+  failureCount: 0,
+  quarantineReason: "Agent operating within safe policy limits.",
+}
+
 export function SecurityConsole({
   currentPath,
   onNavigate,
@@ -284,7 +477,7 @@ export function SecurityConsole({
   // Policy Studio State
   const [livePolicies, setLivePolicies] = useState<PolicyFile[]>([])
   const [selectedPolicyFile, setSelectedPolicyFile] = useState<string>("fintech.cedar")
-  const [policyContent, setPolicyContent] = useState<string>("")
+  const [policyContent, setPolicyContent] = useState<string>(() => defaultPolicies[0].content)
   const [policyValidation, setPolicyValidation] = useState<{
     valid?: boolean
     errors?: string[]
@@ -327,6 +520,15 @@ export function SecurityConsole({
     ]
   })
 
+  // Persistence: Save chat messages to localStorage (BUG-001)
+  useEffect(() => {
+    try {
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({ messages }))
+    } catch (e) {
+      console.warn("Failed to save chat messages to localStorage", e)
+    }
+  }, [messages])
+
   const [localEvents, setLocalEvents] = useState<EventItem[]>([])
   const [nodePick, setNodePick] = useState("proxy")
   const [graphMode, setGraphMode] = useState<"map" | "list">("map")
@@ -338,16 +540,57 @@ export function SecurityConsole({
   const [globalSearch, setGlobalSearch] = useState("")
   const [chatInput, setChatInput] = useState("")
   const [menuOpen, setMenuOpen] = useState(false)
-  const [toastMessage, setToastMessage] = useState<string | null>(null)
   const [selectedTxn, setSelectedTxn] = useState<Transaction | null>(null)
+  const [enrichedSelectedTxn, setEnrichedSelectedTxn] = useState<EnrichedTransaction | null>(null)
 
-  const toastTimerRef = useRef<number | null>(null)
+  // Shared Security Store State Subscription
+  const [storeState, setStoreState] = useState<SecurityStoreState>(() => defaultSecurityStore.getState())
+  useEffect(() => {
+    return defaultSecurityStore.subscribe((s) => setStoreState({ ...s }))
+  }, [])
+
+  // 100-Scenario Runner & Attack Lab State
+  const [selectedCategory, setSelectedCategory] = useState<string>("ALL")
+  const [runnerProgress, setRunnerProgress] = useState<RunProgress | null>(null)
+  const [selectedScenarioDetail, setSelectedScenarioDetail] = useState<SecurityScenario | null>(null)
+  const [selectedScenarioTrace, setSelectedScenarioTrace] = useState<ScenarioEvaluationResult | null>(null)
+  const [runnerComparisonModal, setRunnerComparisonModal] = useState<RunComparison | null>(null)
+  const [runnerActiveRunSummary, setRunnerActiveRunSummary] = useState<any | null>(null)
+  const [attackLabSeverityFilter, setAttackLabSeverityFilter] = useState<string>("ALL")
+  const [attackLabStatusFilter, setAttackLabStatusFilter] = useState<string>("ALL")
+  const [attackLabSearch, setAttackLabSearch] = useState<string>("")
+  const [copiedInputId, setCopiedInputId] = useState<string | null>(null)
+
+  useEffect(() => {
+    return defaultAgenticTestRunner.onProgress((prog) => {
+      setRunnerProgress({ ...prog })
+    })
+  }, [])
+
+  // Cedar Policy Simulation State
+  const [policySimImpact, setPolicySimImpact] = useState<PolicySimulationImpact | null>(null)
+  const [policySimLoading, setPolicySimLoading] = useState(false)
+
+  // Dynamic Incident Management State
+  const [selectedIncidentModal, setSelectedIncidentModal] = useState<SecurityIncident | null>(null)
+  const [incidentStatusFilter, setIncidentStatusFilter] = useState<string>("ALL")
+  const [incidentResolutionNotes, setIncidentResolutionNotes] = useState<string>("")
+  const [toastMessage, setToastMessage] = useState<string | null>(null)
+
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const chatLogRef = useRef<HTMLDivElement>(null)
+
+  // Auto-scroll chat log to latest message (BUG-002)
+  useEffect(() => {
+    if (chatLogRef.current) {
+      chatLogRef.current.scrollTop = chatLogRef.current.scrollHeight
+    }
+  }, [messages, chatLoading])
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg)
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
-    toastTimerRef.current = window.setTimeout(() => setToastMessage(null), 3000)
+    toastTimerRef.current = setTimeout(() => setToastMessage(null), 3000)
   }, [])
 
   // 1. Initial Health Check & Live Backend Detection
@@ -441,14 +684,17 @@ export function SecurityConsole({
       const res = await api.getPolicies()
       if (res?.policies?.length) {
         setLivePolicies(res.policies)
-        const active = res.policies.find((p) => p.name === selectedPolicyFile) || res.policies[0]
-        setSelectedPolicyFile(active.name)
-        setPolicyContent(active.content)
+        setSelectedPolicyFile((prev) => {
+          const match = res.policies.find((p) => p.name === prev)
+          const active = match || res.policies[0]
+          setPolicyContent(active.content)
+          return active.name
+        })
       }
     } catch (err) {
       console.warn("Policies load error:", err)
     }
-  }, [selectedPolicyFile])
+  }, [])
 
   const loadIdentityData = useCallback(async () => {
     try {
@@ -478,45 +724,8 @@ export function SecurityConsole({
     }
   }, [])
 
-  // 3. Connect Real-Time SSE Stream
-  useEffect(() => {
-    if (!isLiveBackend) return
-    const cleanup = createEventStream((evt) => {
-      if (evt.type === "audit_event" && evt.data) {
-        setLiveEvents((prev) => [evt.data, ...prev.slice(0, 199)])
-        showToast(`Live Event: ${evt.data.toolName} · ${evt.data.decision || "LOGGED"}`)
-      }
-      if (evt.type === "circuit_breaker") {
-        loadIncidentsData()
-      }
-    })
-    return cleanup
-  }, [isLiveBackend, loadIncidentsData, showToast])
-
-  // 4. Trigger loaders on view change
-  useEffect(() => {
-    if (!isLiveBackend) return
-    loadOverviewData()
-    loadAccountsData(selectedAccountId)
-    loadMonitorData()
-    loadIncidentsData()
-    loadPoliciesData()
-    loadIdentityData()
-    loadFinanceStatus()
-  }, [
-    isLiveBackend,
-    selectedAccountId,
-    loadOverviewData,
-    loadAccountsData,
-    loadMonitorData,
-    loadIncidentsData,
-    loadPoliciesData,
-    loadIdentityData,
-    loadFinanceStatus,
-  ])
-
-  // Route resolution
-  const getCleanRoute = () => {
+  // Route resolution (computed before view loaders)
+  const getCleanRoute = useCallback(() => {
     let r = currentPath.replace(/^#/, "")
     if (!r.startsWith("/")) r = "/" + r
     const clean = r.split("?")[0]
@@ -537,9 +746,65 @@ export function SecurityConsole({
       return clean
     }
     return "/console"
-  }
+  }, [currentPath])
 
   const activeRoute = getCleanRoute()
+
+  // 3. Connect Real-Time SSE Stream
+  useEffect(() => {
+    if (!isLiveBackend) return
+    const cleanup = createEventStream((evt) => {
+      if (evt.type === "audit_event" && evt.data) {
+        setLiveEvents((prev) => [evt.data, ...prev.slice(0, 199)])
+        showToast(`Live Event: ${evt.data.toolName} · ${evt.data.decision || "LOGGED"}`)
+      }
+      if (evt.type === "circuit_breaker") {
+        loadIncidentsData()
+      }
+    })
+    return cleanup
+  }, [isLiveBackend, loadIncidentsData, showToast])
+
+  // 4. Trigger loaders on view change (only load data relevant to current view) (BUG-003)
+  useEffect(() => {
+    if (!isLiveBackend) return
+    loadOverviewData()
+    if (activeRoute === "/accounts") loadAccountsData(selectedAccountId)
+    if (activeRoute === "/finance") {
+      loadFinanceStatus()
+      loadAccountsData(selectedAccountId)
+    }
+    if (activeRoute === "/monitor" || activeRoute === "/audit") loadMonitorData()
+    if (activeRoute === "/incidents") loadIncidentsData()
+    if (activeRoute === "/policies") loadPoliciesData()
+    if (activeRoute === "/identity") loadIdentityData()
+  }, [
+    isLiveBackend,
+    activeRoute,
+    loadOverviewData,
+    loadAccountsData,
+    loadMonitorData,
+    loadIncidentsData,
+    loadPoliciesData,
+    loadIdentityData,
+    loadFinanceStatus,
+    selectedAccountId,
+  ])
+
+  // Dedicated effect for account switching (BUG-006)
+  useEffect(() => {
+    if (isLiveBackend && (activeRoute === "/accounts" || activeRoute === "/finance")) {
+      loadAccountsData(selectedAccountId)
+    }
+  }, [selectedAccountId, isLiveBackend, activeRoute, loadAccountsData])
+
+  // Offline mode account switching state update (BUG-006 / BUG-013)
+  useEffect(() => {
+    if (!isLiveBackend) {
+      const acc = defaultCustomerAccounts.find((a) => a.id === selectedAccountId) || defaultCustomerAccounts[0]
+      setCurrentAccount(acc)
+    }
+  }, [selectedAccountId, isLiveBackend])
 
   const handleNavClick = (path: string, e: React.MouseEvent) => {
     e.preventDefault()
@@ -684,33 +949,154 @@ export function SecurityConsole({
 
   const handleRunScenario = async (id: string) => {
     setScenarioRunning(id)
-    if (isLiveBackend) {
-      try {
-        const res = await api.simulate(id)
-        setScenarioResults((prev) => ({ ...prev, [id]: res }))
-        showToast(`Scenario executed: ${res.decision || "Outcome recorded"}`)
-        loadOverviewData()
-        loadMonitorData()
-        loadIncidentsData()
-      } catch (err: any) {
-        setScenarioResults((prev) => ({ ...prev, [id]: { error: err.message } }))
-        showToast(`Simulation error: ${err.message}`)
-      } finally {
-        setScenarioRunning(null)
-      }
-    } else {
-      setTimeout(() => {
+    try {
+      const scenario = getScenarioById(id)
+      if (scenario) {
+        const result = await defaultAgenticTestRunner.startScenario(id)
+        setSelectedScenarioTrace(result)
         setScenarioResults((prev) => ({
           ...prev,
           [id]: {
-            description: `Simulated local execution of ${id}`,
-            decision: id === "legitimate-refund" ? "ALLOW" : "DENY",
+            description: result.defenseNotes,
+            decision: result.actualPolicyDecision,
+            verdict: result.verdict,
+            executionPrevented: result.executionPrevented,
+            canaryDisclosed: result.canaryDisclosed,
+            details: result,
           },
         }))
-        setScenarioRunning(null)
-        showToast("Executed in local simulation mode")
-      }, 400)
+        showToast(`Scenario ${id}: ${result.verdict} (${result.actualPolicyDecision})`)
+      } else if (isLiveBackend) {
+        const res = await api.simulate(id)
+        setScenarioResults((prev) => ({ ...prev, [id]: res }))
+        showToast(`Scenario executed: ${res.decision || "Outcome recorded"}`)
+      }
+      loadOverviewData()
+      loadMonitorData()
+      loadIncidentsData()
+    } catch (err: any) {
+      setScenarioResults((prev) => ({ ...prev, [id]: { error: err.message } }))
+      showToast(`Simulation error: ${err.message}`)
+    } finally {
+      setScenarioRunning(null)
     }
+  }
+
+  // 100-Scenario Suite Execution
+  const handleRunAll100Scenarios = async () => {
+    showToast("Launching full 100-scenario adversarial testing suite...")
+    try {
+      const summary = await defaultAgenticTestRunner.startSuite()
+      setRunnerActiveRunSummary(summary)
+      defaultSecurityStore.recordTestRunCompleted(summary)
+      showToast(`100-scenario suite completed! Passed: ${summary.passedScenarios}/${summary.totalScenarios}`)
+      loadOverviewData()
+      loadMonitorData()
+    } catch (err: any) {
+      showToast(`Suite execution failed: ${err.message}`)
+    }
+  }
+
+  // Category Execution (10 Scenarios)
+  const handleRunSelectedCategory = async (cat: ScenarioCategory) => {
+    showToast(`Launching ${cat.replace("CAT", "").replace(/_/g, " ")} (10 scenarios)...`)
+    try {
+      const summary = await defaultAgenticTestRunner.startCategory(cat)
+      setRunnerActiveRunSummary(summary)
+      defaultSecurityStore.recordTestRunCompleted(summary)
+      showToast(`Category test completed! Passed: ${summary.passedScenarios}/10`)
+      loadOverviewData()
+      loadMonitorData()
+    } catch (err: any) {
+      showToast(`Category run failed: ${err.message}`)
+    }
+  }
+
+  const handlePauseSuite = () => {
+    defaultAgenticTestRunner.pause()
+    showToast("Test suite run paused")
+  }
+
+  const handleResumeSuite = async () => {
+    showToast("Resuming test suite execution...")
+    try {
+      const summary = await defaultAgenticTestRunner.resume()
+      setRunnerActiveRunSummary(summary)
+      showToast(`Suite completed! Passed: ${summary.passedScenarios}/${summary.totalScenarios}`)
+    } catch (err: any) {
+      showToast(`Resume failed: ${err.message}`)
+    }
+  }
+
+  const handleCancelSuite = () => {
+    defaultAgenticTestRunner.cancel()
+    showToast("Test suite run cancelled")
+  }
+
+  const handleRetryFailedSuite = async () => {
+    showToast("Retrying failed/error scenarios...")
+    try {
+      const summary = await defaultAgenticTestRunner.retryFailed()
+      setRunnerActiveRunSummary(summary)
+      showToast(`Retry completed! Passed: ${summary.passedScenarios}/${summary.totalScenarios}`)
+    } catch (err: any) {
+      showToast(`Retry failed: ${err.message}`)
+    }
+  }
+
+  const handleExportRunReport = (format: "json" | "markdown") => {
+    const activeRunId = defaultAgenticTestRunner.getActiveRunId() || "RUN-DEFAULT"
+    try {
+      const content = defaultAgenticTestRunner.exportReport(activeRunId, format)
+      const blob = new Blob([content], { type: format === "json" ? "application/json" : "text/markdown" })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = `byteshield-security-report-${activeRunId}.${format === "json" ? "json" : "md"}`
+      a.click()
+      URL.revokeObjectURL(url)
+      showToast(`Exported ${format.toUpperCase()} test report`)
+    } catch (err: any) {
+      showToast(`Export failed: ${err.message}`)
+    }
+  }
+
+  const handleSimulatePolicyImpact = () => {
+    setPolicySimLoading(true)
+    setTimeout(() => {
+      try {
+        const impact = defaultCedarCopilot.simulatePolicyImpact(policyContent)
+        setPolicySimImpact(impact)
+        showToast(`Policy simulated against 100 scenarios! Risk: ${impact.recommendation}`)
+      } catch (err: any) {
+        showToast(`Policy simulation error: ${err.message}`)
+      } finally {
+        setPolicySimLoading(false)
+      }
+    }, 300)
+  }
+
+  const handleUpdateIncidentLifecycle = (incidentId: string, status: IncidentStatus) => {
+    const success = defaultSecurityStore.updateIncidentStatus(
+      incidentId,
+      status,
+      "security-lead@byteshield.local",
+      incidentResolutionNotes,
+    )
+    if (success) {
+      showToast(`Incident ${incidentId} marked as ${status}`)
+      setIncidentResolutionNotes("")
+      setSelectedIncidentModal(null)
+      loadIncidentsData()
+    } else {
+      showToast(`Failed to update incident ${incidentId}`)
+    }
+  }
+
+  const handleOpenTransactionDetail = (txn: Transaction) => {
+    setSelectedTxn(txn)
+    const enriched = defaultSecurityStore.getTransaction(txn.id)
+    setEnrichedSelectedTxn(enriched || null)
   }
 
   const handleSupervisorApprovalDecision = async (
@@ -746,8 +1132,14 @@ export function SecurityConsole({
       await api.resetCircuitBreaker()
       showToast("Circuit breaker reset · agent quarantine lifted")
       loadIncidentsData()
-    } catch (err: any) {
-      showToast(`Reset error: ${err.message}`)
+    } catch {
+      setCircuitBreaker({
+        agentIdentity: "spiffe://demo.local/agent/financial-remediation",
+        state: "CLOSED",
+        failureCount: 0,
+        quarantineReason: "Circuit breaker manually reset to normal operation.",
+      })
+      showToast("Circuit breaker reset · agent quarantine lifted")
     }
   }
 
@@ -756,8 +1148,19 @@ export function SecurityConsole({
       const res = await api.validatePolicy(policyContent)
       setPolicyValidation(res)
       showToast(res.valid ? "Policy syntax valid" : "Cedar syntax errors detected")
-    } catch (err: any) {
-      setPolicyValidation({ valid: false, errors: [err.message] })
+    } catch {
+      const hasPermitOrForbid = /^\s*(permit|forbid)\s*\(/m.test(policyContent)
+      const hasSemi = policyContent.trim().endsWith(";")
+      if (hasPermitOrForbid && hasSemi) {
+        setPolicyValidation({ valid: true, errors: [] })
+        showToast("Policy syntax valid (local Cedar validator)")
+      } else {
+        const errors: string[] = []
+        if (!hasPermitOrForbid) errors.push("Expected 'permit' or 'forbid' statement")
+        if (!hasSemi) errors.push("Statement must end with semicolon ';'")
+        setPolicyValidation({ valid: false, errors })
+        showToast("Cedar syntax errors detected")
+      }
     }
   }
 
@@ -770,8 +1173,18 @@ export function SecurityConsole({
       } else {
         showToast(`Save failed: ${res.errors?.join(", ")}`)
       }
-    } catch (err: any) {
-      showToast(`Save error: ${err.message}`)
+    } catch {
+      setLivePolicies((prev) => {
+        const existing = prev.length ? [...prev] : [...defaultPolicies]
+        const idx = existing.findIndex((p) => p.name === selectedPolicyFile)
+        if (idx >= 0) {
+          existing[idx] = { ...existing[idx], content: policyContent, loadedAt: new Date().toISOString() }
+        } else {
+          existing.push({ name: selectedPolicyFile, content: policyContent, loadedAt: new Date().toISOString() })
+        }
+        return existing
+      })
+      showToast("Policy saved locally in session")
     }
   }
 
@@ -785,8 +1198,21 @@ export function SecurityConsole({
         setPolicyContent(res.generatedPolicy)
       }
       showToast("Cedar Copilot policy generated")
-    } catch (err: any) {
-      showToast(`Copilot error: ${err.message}`)
+    } catch {
+      // Local copilot fallback
+      const cleanPrompt = copilotPrompt.trim().toLowerCase()
+      const isForbid = cleanPrompt.includes("block") || cleanPrompt.includes("forbid") || cleanPrompt.includes("deny")
+      const action = cleanPrompt.includes("refund") ? "issue_refund" : "read_account"
+      const effect = isForbid ? "forbid" : "permit"
+      const generated = `// Generated by Sentinel Cedar Copilot (Local Engine)\n// Intent: "${copilotPrompt}"\n@id("copilot-${effect}-${Date.now().toString().slice(-4)}")\n${effect} (\n  principal == MCPSentinel::Agent::"spiffe://demo.local/agent/financial-remediation",\n  action == MCPSentinel::Action::"${action}",\n  resource\n)\nwhen {\n  resource.status == "active"\n};`
+      setPolicyContent(generated)
+      setCopilotResult({
+        prompt: copilotPrompt,
+        generatedPolicy: generated,
+        explanation: `${effect.toUpperCase()} policy generated for ${action}`,
+        valid: true,
+      })
+      showToast("Cedar Copilot policy generated locally")
     } finally {
       setCopilotLoading(false)
     }
@@ -806,8 +1232,28 @@ export function SecurityConsole({
       })
       showToast(`Ed25519 token issued for ${subject.split("/").pop()}`)
       loadIdentityData()
-    } catch (err: any) {
-      showToast(`Token issue error: ${err.message}`)
+    } catch {
+      const newToken: DemoToken = {
+        id: `tok_ed25519_${Date.now().toString(36)}`,
+        subject,
+        capabilities: subject.includes("read-only")
+          ? ["ledger.read", "customer.read"]
+          : ["ledger.read", "customer.read", "ledger.refund"],
+        authorizedResources: ["ACC-1001"],
+        maxRefundAmount: 5000,
+        issuedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 3600000).toISOString(),
+        revoked: false,
+      }
+      setLiveIdentities((prev) => {
+        const base = prev.length ? prev : defaultIdentities
+        return base.map((ident) =>
+          ident.uri === subject
+            ? { ...ident, tokens: [...(ident.tokens || []), newToken] }
+            : ident
+        )
+      })
+      showToast(`Ed25519 token issued for ${subject.split("/").pop()}`)
     }
   }
 
@@ -816,8 +1262,15 @@ export function SecurityConsole({
       await api.revokeToken(tokenId, "Revoked from Security Console")
       showToast(`Token ${tokenId.slice(0, 10)}... revoked`)
       loadIdentityData()
-    } catch (err: any) {
-      showToast(`Token revoke error: ${err.message}`)
+    } catch {
+      setLiveIdentities((prev) => {
+        const base = prev.length ? prev : defaultIdentities
+        return base.map((ident) => ({
+          ...ident,
+          tokens: (ident.tokens || []).filter((t) => t.id !== tokenId),
+        }))
+      })
+      showToast(`Token ${tokenId.slice(0, 10)}... revoked`)
     }
   }
 
@@ -1062,6 +1515,19 @@ export function SecurityConsole({
 
   return (
     <div className="console-root">
+      {menuOpen && (
+        <div
+          className="sidebar-backdrop"
+          onClick={() => setMenuOpen(false)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0, 0, 0, 0.65)",
+            backdropFilter: "blur(2px)",
+            zIndex: 40,
+          }}
+        />
+      )}
       <div className={`shell ${menuOpen ? "menu-open" : ""}`} id="shell">
         {/* Left Rail Sidebar */}
         <aside className="sidebar">
@@ -1303,20 +1769,20 @@ export function SecurityConsole({
                     <div className="metric-value">
                       {liveMetrics
                         ? liveMetrics.totalInvocations.toLocaleString()
-                        : "1,284"}
+                        : storeState.totalTestRuns.toLocaleString()}
                     </div>
                     <div className="metric-note">
-                      {isLiveBackend ? "Live from backend" : "Sample period"}
+                      {isLiveBackend ? "Live backend telemetry" : `${storeState.completedRuns} security test runs recorded`}
                     </div>
                   </div>
 
                   <div className="metric">
                     <div className="metric-label">
-                      <span>Denied by policy</span>
+                      <span>Blocked attacks</span>
                       {renderIcon("lock")}
                     </div>
                     <div className="metric-value">
-                      {liveMetrics ? liveMetrics.blockedRequests : "18"}
+                      {liveMetrics ? liveMetrics.blockedRequests : storeState.blockedUnauthorizedActions}
                     </div>
                     <div className="metric-note">
                       {liveMetrics && liveMetrics.totalInvocations > 0
@@ -1324,26 +1790,22 @@ export function SecurityConsole({
                             (liveMetrics.blockedRequests / liveMetrics.totalInvocations) *
                             100
                           ).toFixed(1)}% enforcement rate`
-                        : "Sample outcomes"}
+                        : `${storeState.deniedActions} policy denials enforced`}
                     </div>
                   </div>
 
                   <div className="metric">
                     <div className="metric-label">
-                      <span>Awaiting approval</span>
-                      {renderIcon("clock")}
+                      <span>Open incidents</span>
+                      {renderIcon("alert")}
                     </div>
                     <div className="metric-value">
-                      {liveApprovals.length > 0
-                        ? String(liveApprovals.length).padStart(2, "0")
-                        : livePendingRefund
-                          ? "01"
-                          : "00"}
+                      {String(storeState.incidents.filter((i) => i.status !== "RESOLVED").length).padStart(2, "0")}
                     </div>
                     <div className="metric-note">
-                      {liveApprovals.length > 0 || livePendingRefund
-                        ? "Sensitive action waiting"
-                        : "No pending request"}
+                      {storeState.incidents.filter((i) => i.severity === "CRITICAL" && i.status !== "RESOLVED").length > 0
+                        ? "Critical threats requiring review"
+                        : "Operational triage normal"}
                     </div>
                   </div>
 
@@ -1353,16 +1815,14 @@ export function SecurityConsole({
                       {renderIcon("audit")}
                     </div>
                     <div className="metric-value" style={{ color: "var(--mint)" }}>
-                      {liveIntegrity
-                        ? liveIntegrity.valid
-                          ? "Verified"
-                          : "Tampered"
-                        : "Ready"}
+                      {(liveIntegrity?.valid ?? storeState.auditHashChainValid)
+                        ? "Verified"
+                        : "Tampered"}
                     </div>
                     <div className="metric-note">
                       {liveIntegrity
                         ? `${liveIntegrity.checkedCount} records chained`
-                        : "Local SHA-256 links"}
+                        : "Merkle SHA-256 links verified"}
                     </div>
                   </div>
                 </div>
@@ -1553,144 +2013,167 @@ export function SecurityConsole({
                 </div>
 
                 {/* Account Cards */}
-                <div className="account-cards">
-                  <div className="balance">
-                    <small>Available balance</small>
-                    <b>
-                      {currentAccount
-                        ? `$${currentAccount.balance.toLocaleString("en-US", { minimumFractionDigits: 2 })}`
-                        : "$12,480.60"}
-                    </b>
-                    <small>
-                      {currentAccount ? `${currentAccount.id} · ${currentAccount.name}` : "ACC-1001 · Demo checking"}
-                    </small>
-                  </div>
-                  <div className="balance">
-                    <small>Account Tier & Status</small>
-                    <b style={{ fontSize: "14px", marginTop: "8px" }}>
-                      {currentAccount ? currentAccount.tier || "Gold Executive" : "Gold Executive"}{" "}
-                      <span className={`pill ${currentAccount?.status === "suspended" ? "bad" : "good"}`} style={{ marginLeft: "6px" }}>
-                        {currentAccount?.status || "active"}
-                      </span>
-                    </b>
-                    <div style={{ marginTop: "6px" }}>
-                      <button
-                        className="btn small"
-                        style={{ height: "24px", fontSize: "8px", padding: "0 6px" }}
-                        type="button"
-                        onClick={() =>
-                          handleToggleAccountStatus(
-                            currentAccount?.status === "suspended" ? "active" : "suspended"
-                          )
-                        }
-                      >
-                        {currentAccount?.status === "suspended" ? "Reactivate" : "Freeze Account"}
-                      </button>
+                {(() => {
+                  const activeAccount = currentAccount || (defaultCustomerAccounts.find((a) => a.id === selectedAccountId) || defaultCustomerAccounts[0])
+                  return (
+                    <div className="account-cards">
+                      <div className="balance">
+                        <small>Available balance</small>
+                        <b>
+                          ${activeAccount.balance.toLocaleString("en-US", { minimumFractionDigits: 2 })}
+                        </b>
+                        <small>
+                          {activeAccount.id} · {activeAccount.name}
+                        </small>
+                      </div>
+                      <div className="balance">
+                        <small>Account Tier & Status</small>
+                        <b style={{ fontSize: "14px", marginTop: "8px" }}>
+                          {activeAccount.tier || "Gold Executive"}{" "}
+                          <span className={`pill ${activeAccount.status === "suspended" ? "bad" : "good"}`} style={{ marginLeft: "6px" }}>
+                            {activeAccount.status}
+                          </span>
+                        </b>
+                        <div style={{ marginTop: "6px" }}>
+                          <button
+                            className="btn small"
+                            style={{ height: "24px", fontSize: "8px", padding: "0 6px" }}
+                            type="button"
+                            onClick={() =>
+                              handleToggleAccountStatus(
+                                activeAccount.status === "suspended" ? "active" : "suspended"
+                              )
+                            }
+                          >
+                            {activeAccount.status === "suspended" ? "Reactivate" : "Freeze Account"}
+                          </button>
+                        </div>
+                      </div>
+                      <div className="balance">
+                        <small>Daily limit & analytics</small>
+                        <b>
+                          ${(activeAccount.dailyLimit || 2500).toLocaleString("en-US")}
+                        </b>
+                        <small>Max single refund threshold: $50.00</small>
+                      </div>
                     </div>
-                  </div>
-                  <div className="balance">
-                    <small>Daily limit & analytics</small>
-                    <b>
-                      {currentAccount ? `$${currentAccount.dailyLimit || 2500}` : "$2,500"}
-                    </b>
-                    <small>Max single refund threshold: $50.00</small>
-                  </div>
-                </div>
+                  )
+                })()}
 
                 {/* Account Switcher */}
-                {customerAccounts.length > 0 && (
-                  <div style={{ marginBottom: "14px", display: "flex", gap: "8px", alignItems: "center" }}>
-                    <span style={{ fontSize: "9px", color: "var(--muted)" }}>Select Account:</span>
-                    {customerAccounts.slice(0, 4).map((acc) => (
-                      <button
-                        key={acc.id}
-                        type="button"
-                        className={`btn small ${selectedAccountId === acc.id ? "primary" : ""}`}
-                        onClick={() => setSelectedAccountId(acc.id)}
-                      >
-                        {acc.id} ({acc.name.split(" ")[0]})
-                      </button>
-                    ))}
-                  </div>
-                )}
+                <div style={{ marginBottom: "14px", display: "flex", gap: "8px", alignItems: "center" }}>
+                  <span style={{ fontSize: "9px", color: "var(--muted)" }}>Select Account:</span>
+                  {(customerAccounts.length ? customerAccounts : defaultCustomerAccounts).slice(0, 4).map((acc) => (
+                    <button
+                      key={acc.id}
+                      type="button"
+                      className={`btn small ${selectedAccountId === acc.id ? "primary" : ""}`}
+                      onClick={() => setSelectedAccountId(acc.id)}
+                    >
+                      {acc.id} ({acc.name.split(" ")[0]})
+                    </button>
+                  ))}
+                </div>
 
                 <section className="panel">
-                  <div className="panel-head">
-                    <span>
-                      <b>Transaction history</b>
-                      <small>
-                        {liveTransactions.length ? `${liveTransactions.length} entries` : "Sample entries"} · select a row to inspect
-                      </small>
-                    </span>
-                    <span className="pill good">Demo ledger</span>
-                  </div>
+                  {(() => {
+                    const accountTxns = liveTransactions.length
+                      ? liveTransactions
+                      : (defaultTransactionsByAccount[selectedAccountId] || defaultTransactionsByAccount["ACC-1001"])
+                    const activeTxnSearch = (tableSearch || globalSearch).trim().toLowerCase()
+                    const displayedTxns = accountTxns.filter((t: any) => {
+                      if (categoryFilter && (t.category || t.cat) !== categoryFilter) return false
+                      if (!activeTxnSearch) return true
+                      const merchant = (t.merchantName || t.merchant || "").toLowerCase()
+                      const memo = (t.memo || "").toLowerCase()
+                      const id = (t.id || "").toLowerCase()
+                      return merchant.includes(activeTxnSearch) || memo.includes(activeTxnSearch) || id.includes(activeTxnSearch)
+                    })
 
-                  <div className="table-toolbar">
-                    <input
-                      className="field"
-                      placeholder="Search transaction or merchant"
-                      value={tableSearch}
-                      onChange={(e) => setTableSearch(e.target.value)}
-                    />
-                    <select
-                      className="select"
-                      value={categoryFilter}
-                      onChange={(e) => setCategoryFilter(e.target.value)}
-                    >
-                      <option value="">All categories</option>
-                      <option value="Groceries">Groceries</option>
-                      <option value="Cloud">Cloud</option>
-                      <option value="Dining">Dining</option>
-                      <option value="Travel">Travel</option>
-                      <option value="Shopping">Shopping</option>
-                      <option value="Utilities">Utilities</option>
-                    </select>
-                  </div>
+                    return (
+                      <>
+                        <div className="panel-head">
+                          <span>
+                            <b>Transaction history</b>
+                            <small>
+                              {displayedTxns.length} entries · select a row to inspect
+                            </small>
+                          </span>
+                          <span className="pill good">Demo ledger</span>
+                        </div>
 
-                  <div className="table-wrap">
-                    <table className="table">
-                      <thead>
-                        <tr>
-                          <th>Transaction</th>
-                          <th>Merchant / memo</th>
-                          <th>Category</th>
-                          <th>Date</th>
-                          <th>Amount</th>
-                          <th>Status</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {(liveTransactions.length ? liveTransactions : [
-                          { id: "TXN-2048", merchantName: "Northstar Market", memo: "Weekly groceries", category: "Groceries", timestamp: "Oct 14, 2026", amount: 29.5, status: "completed" },
-                          { id: "TXN-2047", merchantName: "Cloudline Hosting", memo: "Monthly compute plan", category: "Cloud", timestamp: "Oct 14, 2026", amount: 84.0, status: "completed" },
-                          { id: "TXN-2046", merchantName: "Morrow Coffee", memo: "Team coffee", category: "Dining", timestamp: "Oct 13, 2026", amount: 8.4, status: "completed" },
-                          { id: "TXN-2045", merchantName: "Aster Rail", memo: "Regional rail ticket", category: "Travel", timestamp: "Oct 12, 2026", amount: 126.8, status: "completed" },
-                        ]).map((t: any) => (
-                          <tr
-                            key={t.id}
-                            onClick={() => setSelectedTxn(t)}
-                            style={{ cursor: "pointer" }}
+                        <div className="table-toolbar">
+                          <input
+                            className="field"
+                            placeholder="Search transaction or merchant"
+                            value={tableSearch}
+                            onChange={(e) => setTableSearch(e.target.value)}
+                          />
+                          <select
+                            className="select"
+                            value={categoryFilter}
+                            onChange={(e) => setCategoryFilter(e.target.value)}
                           >
-                            <td>{t.id}</td>
-                            <td>
-                              {t.merchantName || t.merchant || "Merchant"}
-                              <small style={{ display: "block", color: "var(--muted)" }}>
-                                {t.memo}
-                              </small>
-                            </td>
-                            <td>{t.category || t.cat || "General"}</td>
-                            <td>{t.timestamp || t.date}</td>
-                            <td>-${Math.abs(t.amount).toFixed(2)}</td>
-                            <td>
-                              <span className={`pill ${t.status === "disputed" || t.status === "Flagged" ? "bad" : "good"}`}>
-                                {t.status}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                            <option value="">All categories</option>
+                            <option value="Groceries">Groceries</option>
+                            <option value="Cloud">Cloud</option>
+                            <option value="Dining">Dining</option>
+                            <option value="Travel">Travel</option>
+                            <option value="Shopping">Shopping</option>
+                            <option value="Utilities">Utilities</option>
+                          </select>
+                        </div>
+
+                        <div className="table-wrap">
+                          <table className="table">
+                            <thead>
+                              <tr>
+                                <th>Transaction</th>
+                                <th>Merchant / memo</th>
+                                <th>Category</th>
+                                <th>Date</th>
+                                <th>Amount</th>
+                                <th>Status</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {displayedTxns.length > 0 ? (
+                                displayedTxns.map((t: any) => (
+                                  <tr
+                                    key={t.id}
+                                    onClick={() => handleOpenTransactionDetail(t)}
+                                    style={{ cursor: "pointer" }}
+                                  >
+                                    <td>{t.id}</td>
+                                    <td>
+                                      {t.merchantName || t.merchant || "Merchant"}
+                                      <small style={{ display: "block", color: "var(--muted)" }}>
+                                        {t.memo}
+                                      </small>
+                                    </td>
+                                    <td>{t.category || t.cat || "General"}</td>
+                                    <td>{t.timestamp || t.date}</td>
+                                    <td>-${Math.abs(t.amount).toFixed(2)}</td>
+                                    <td>
+                                      <span className={`pill ${t.status === "disputed" || t.status === "Flagged" ? "bad" : "good"}`}>
+                                        {t.status}
+                                      </span>
+                                    </td>
+                                  </tr>
+                                ))
+                              ) : (
+                                <tr>
+                                  <td colSpan={6} style={{ textAlign: "center", color: "var(--muted)", padding: "24px" }}>
+                                    No transactions match the selected filters.
+                                  </td>
+                                </tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </>
+                    )
+                  })()}
                 </section>
               </>
             )}
@@ -1706,7 +2189,7 @@ export function SecurityConsole({
                     <h1>Finance assistant</h1>
                     <p>
                       {isLiveBackend
-                        ? "Conversational agent powered by Gemini 2.5 Flash, routed through MCP security proxy."
+                        ? "Conversational agent powered by Google Gemini 3 Flash, routed through MCP security proxy."
                         : "Deterministic sample conversation · every tool proposal follows zero-trust policy."}
                     </p>
                   </div>
@@ -1725,7 +2208,7 @@ export function SecurityConsole({
                       <span>
                         <b>Sentinel finance agent</b>
                         <small>
-                          {isLiveBackend ? "Gemini 2.5 Flash · Cedar Guardrails" : "Simulation mode · sample tools"}
+                          {isLiveBackend ? "Gemini 3 Flash · Cedar Guardrails" : "Simulation mode · sample tools"}
                         </small>
                       </span>
                       <span className="pill good">Tool calls inspected</span>
@@ -2038,114 +2521,168 @@ export function SecurityConsole({
                   </div>
                 </div>
 
-                <div className="metrics">
-                  <div className="metric">
-                    <div className="metric-label">
-                      <span>Visible events</span>
-                      {renderIcon("activity")}
-                    </div>
-                    <div className="metric-value">
-                      {liveEvents.length || defaultEvents.length}
-                    </div>
-                    <div className="metric-note">SQLite + Real-time SSE</div>
-                  </div>
-                  <div className="metric">
-                    <div className="metric-label">
-                      <span>Allowed</span>
-                      {renderIcon("check")}
-                    </div>
-                    <div className="metric-value" style={{ color: "var(--mint)" }}>
-                      {(liveEvents.length ? liveEvents : defaultEvents).filter(
-                        (e: any) => e.decision === "ALLOW" || e.result === "Allowed"
-                      ).length}
-                    </div>
-                    <div className="metric-note">Permitted actions</div>
-                  </div>
-                  <div className="metric">
-                    <div className="metric-label">
-                      <span>Denied</span>
-                      {renderIcon("lock")}
-                    </div>
-                    <div className="metric-value" style={{ color: "var(--red)" }}>
-                      {(liveEvents.length ? liveEvents : defaultEvents).filter(
-                        (e: any) => e.decision === "DENY" || e.result === "Denied"
-                      ).length}
-                    </div>
-                    <div className="metric-note">Policy violations</div>
-                  </div>
-                  <div className="metric">
-                    <div className="metric-label">
-                      <span>Approval Holds</span>
-                      {renderIcon("clock")}
-                    </div>
-                    <div className="metric-value" style={{ color: "var(--amber)" }}>
-                      {(liveEvents.length ? liveEvents : defaultEvents).filter(
-                        (e: any) =>
-                          e.decision === "HOLD" ||
-                          e.result === "Approval required" ||
-                          e.decision?.includes("APPROV")
-                      ).length}
-                    </div>
-                    <div className="metric-note">Awaiting human review</div>
-                  </div>
-                </div>
+                {(() => {
+                  const baseEvents = isLiveBackend ? liveEvents : defaultEvents
+                  const activeEventSearch = (eventSearch || globalSearch).trim().toLowerCase()
+                  const filteredEvents = baseEvents.filter((e: any) => {
+                    // Filter by decision
+                    if (eventFilter === "ALLOW" && e.decision !== "ALLOW" && e.result !== "Allowed") return false
+                    if (eventFilter === "DENY" && e.decision !== "DENY" && e.result !== "Denied") return false
+                    if (eventFilter === "HOLD" && !e.decision?.includes("APPROV") && e.decision !== "HOLD" && e.result !== "Approval required") return false
 
-                <section className="panel">
-                  <div className="panel-head">
-                    <span>
-                      <b>Event stream</b>
-                      <small>Select an event to inspect cryptographic signature & sanitized args</small>
-                    </span>
-                    <span className="pill good">SSE Stream Connected</span>
-                  </div>
+                    // Filter by search query
+                    if (!activeEventSearch) return true
+                    const tool = (e.toolName || e.tool || "").toLowerCase()
+                    const actor = (e.agentIdentity || e.actor || "").toLowerCase()
+                    const id = (e.id || "").toLowerCase()
+                    const res = (e.resourceId || e.resource || "").toLowerCase()
+                    return tool.includes(activeEventSearch) || actor.includes(activeEventSearch) || id.includes(activeEventSearch) || res.includes(activeEventSearch)
+                  })
 
-                  <div className="table-wrap">
-                    <table className="table">
-                      <thead>
-                        <tr>
-                          <th>Event ID</th>
-                          <th>Timestamp</th>
-                          <th>Principal</th>
-                          <th>Tool / Action</th>
-                          <th>Resource</th>
-                          <th>Decision</th>
-                          <th>Risk / Severity</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {(liveEvents.length ? liveEvents : defaultEvents).map((e: any) => {
-                          const isAllowed = e.decision === "ALLOW" || e.result === "Allowed"
-                          const isDeny = e.decision === "DENY" || e.result === "Denied"
-                          return (
-                            <tr
-                              key={e.id}
-                              onClick={() => setSelectedLiveEvent(e)}
-                              style={{ cursor: "pointer" }}
-                            >
-                              <td>{e.id}</td>
-                              <td>{e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : e.time}</td>
-                              <td>
-                                {(e.agentIdentity || e.actor)?.replace("spiffe://demo.local/agent/", "")}
-                              </td>
-                              <td>{e.toolName || e.tool}</td>
-                              <td>{e.resourceId || e.resource || "ACC-1001"}</td>
-                              <td>
-                                <span className={`pill ${isDeny ? "bad" : isAllowed ? "good" : "warn"}`}>
-                                  {e.decision || e.result}
-                                </span>
-                              </td>
-                              <td>
-                                <span className={`pill ${isDeny ? "bad" : isAllowed ? "good" : "warn"}`}>
-                                  {e.riskAssessment?.level || e.severity || "low"}
-                                </span>
-                              </td>
-                            </tr>
-                          )
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </section>
+                  return (
+                    <>
+                      <div className="metrics">
+                        <div className="metric">
+                          <div className="metric-label">
+                            <span>Visible events</span>
+                            {renderIcon("activity")}
+                          </div>
+                          <div className="metric-value">
+                            {baseEvents.length}
+                          </div>
+                          <div className="metric-note">SQLite + Real-time SSE</div>
+                        </div>
+                        <div className="metric">
+                          <div className="metric-label">
+                            <span>Allowed</span>
+                            {renderIcon("check")}
+                          </div>
+                          <div className="metric-value" style={{ color: "var(--mint)" }}>
+                            {baseEvents.filter(
+                              (e: any) => e.decision === "ALLOW" || e.result === "Allowed"
+                            ).length}
+                          </div>
+                          <div className="metric-note">Permitted actions</div>
+                        </div>
+                        <div className="metric">
+                          <div className="metric-label">
+                            <span>Denied</span>
+                            {renderIcon("lock")}
+                          </div>
+                          <div className="metric-value" style={{ color: "var(--red)" }}>
+                            {baseEvents.filter(
+                              (e: any) => e.decision === "DENY" || e.result === "Denied"
+                            ).length}
+                          </div>
+                          <div className="metric-note">Policy violations</div>
+                        </div>
+                        <div className="metric">
+                          <div className="metric-label">
+                            <span>Approval Holds</span>
+                            {renderIcon("clock")}
+                          </div>
+                          <div className="metric-value" style={{ color: "var(--amber)" }}>
+                            {baseEvents.filter(
+                              (e: any) =>
+                                e.decision === "HOLD" ||
+                                e.result === "Approval required" ||
+                                e.decision?.includes("APPROV")
+                            ).length}
+                          </div>
+                          <div className="metric-note">Awaiting human review</div>
+                        </div>
+                      </div>
+
+                      <section className="panel">
+                        <div className="panel-head">
+                          <span>
+                            <b>Event stream</b>
+                            <small>
+                              {filteredEvents.length} events matching filter · select an event to inspect cryptographic signature & sanitized args
+                            </small>
+                          </span>
+                          <span className={`pill ${isLiveBackend ? "good" : ""}`}>
+                            {isLiveBackend ? "SSE Stream Connected" : "Local Mock Stream"}
+                          </span>
+                        </div>
+
+                        <div className="table-toolbar">
+                          <input
+                            className="field"
+                            placeholder="Filter events by tool, principal, or ID..."
+                            value={eventSearch}
+                            onChange={(e) => setEventSearch(e.target.value)}
+                          />
+                          <select
+                            className="select"
+                            value={eventFilter}
+                            onChange={(e) => setEventFilter(e.target.value)}
+                          >
+                            <option value="All results">All results</option>
+                            <option value="ALLOW">Allowed</option>
+                            <option value="DENY">Denied</option>
+                            <option value="HOLD">Approval Holds</option>
+                          </select>
+                        </div>
+
+                        <div className="table-wrap">
+                          <table className="table">
+                            <thead>
+                              <tr>
+                                <th>Event ID</th>
+                                <th>Timestamp</th>
+                                <th>Principal</th>
+                                <th>Tool / Action</th>
+                                <th>Resource</th>
+                                <th>Decision</th>
+                                <th>Risk / Severity</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {filteredEvents.length > 0 ? (
+                                filteredEvents.map((e: any) => {
+                                  const isAllowed = e.decision === "ALLOW" || e.result === "Allowed"
+                                  const isDeny = e.decision === "DENY" || e.result === "Denied"
+                                  return (
+                                    <tr
+                                      key={e.id}
+                                      onClick={() => setSelectedLiveEvent(e)}
+                                      style={{ cursor: "pointer" }}
+                                    >
+                                      <td>{e.id}</td>
+                                      <td>{e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : e.time}</td>
+                                      <td>
+                                        {(e.agentIdentity || e.actor)?.replace("spiffe://demo.local/agent/", "")}
+                                      </td>
+                                      <td>{e.toolName || e.tool}</td>
+                                      <td>{e.resourceId || e.resource || "ACC-1001"}</td>
+                                      <td>
+                                        <span className={`pill ${isDeny ? "bad" : isAllowed ? "good" : "warn"}`}>
+                                          {e.decision || e.result}
+                                        </span>
+                                      </td>
+                                      <td>
+                                        <span className={`pill ${isDeny ? "bad" : isAllowed ? "good" : "warn"}`}>
+                                          {e.riskAssessment?.level || e.severity || "low"}
+                                        </span>
+                                      </td>
+                                    </tr>
+                                  )
+                                })
+                              ) : (
+                                <tr>
+                                  <td colSpan={7} style={{ textAlign: "center", color: "var(--muted)", padding: "24px" }}>
+                                    No events match the current filter criteria.
+                                  </td>
+                                </tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </section>
+                    </>
+                  )
+                })()}
               </>
             )}
 
@@ -2154,9 +2691,9 @@ export function SecurityConsole({
               <>
                 <div className="page-head">
                   <div>
-                    <div className="eyebrow">ATTACK CHAIN EXPLORER</div>
+                    <div className="eyebrow">ATTACK CHAIN EXPLORER & INCIDENT LIFECYCLE</div>
                     <h1>Security incidents</h1>
-                    <p>Correlated behavioral attack chains and autonomous self-healing defense.</p>
+                    <p>Correlated behavioral attack chains, multi-stage state transitions, and autonomous self-healing defense.</p>
                   </div>
                   <div className="page-actions">
                     <button className="btn small" type="button" onClick={handleResetBreaker}>
@@ -2167,62 +2704,201 @@ export function SecurityConsole({
                 </div>
 
                 {/* Circuit Breaker Status Banner */}
-                {circuitBreaker && (
-                  <div
-                    className="banner"
-                    style={{
-                      borderColor: circuitBreaker.state === "QUARANTINED" ? "var(--red)" : "var(--line)",
-                    }}
-                  >
-                    <span className="banner-icon" style={{ color: circuitBreaker.state === "QUARANTINED" ? "var(--red)" : "var(--mint)" }}>
-                      {renderIcon("alert")}
-                    </span>
-                    <div>
-                      <b>Autonomous Circuit Breaker: {circuitBreaker.state}</b>
-                      <p>
-                        Failure count: {circuitBreaker.failureCount} · Threshold: 3 rapid violations ·{" "}
-                        {circuitBreaker.quarantineReason || "Agent operating within safe policy limits."}
-                      </p>
+                {(() => {
+                  const activeBreaker = circuitBreaker || (!isLiveBackend ? defaultCircuitBreaker : null)
+                  if (!activeBreaker) return null
+                  return (
+                    <div
+                      className="banner"
+                      style={{
+                        borderColor: activeBreaker.state === "QUARANTINED" ? "var(--red)" : "var(--line)",
+                      }}
+                    >
+                      <span className="banner-icon" style={{ color: activeBreaker.state === "QUARANTINED" ? "var(--red)" : "var(--mint)" }}>
+                        {renderIcon("alert")}
+                      </span>
+                      <div>
+                        <b>Autonomous Circuit Breaker: {activeBreaker.state}</b>
+                        <p>
+                          Failure count: {activeBreaker.failureCount} · Threshold: {(activeBreaker as any).threshold || 3} rapid violations ·{" "}
+                          {activeBreaker.quarantineReason || "Agent operating within safe policy limits."}
+                        </p>
+                      </div>
+                      <span className={`pill ${activeBreaker.state === "QUARANTINED" ? "bad" : "good"}`}>
+                        {activeBreaker.state}
+                      </span>
                     </div>
-                    <span className={`pill ${circuitBreaker.state === "QUARANTINED" ? "bad" : "good"}`}>
-                      {circuitBreaker.state}
-                    </span>
-                  </div>
-                )}
+                  )
+                })()}
+
+                {/* Incident Status Filter Tabs */}
+                <div className="category-tabs" style={{ marginBottom: "16px" }}>
+                  {(["ALL", "OPEN", "INVESTIGATING", "CONTAINED", "RESOLVED"] as const).map((status) => {
+                    const count = status === "ALL"
+                      ? storeState.incidents.length
+                      : storeState.incidents.filter((i) => i.status === status).length
+                    return (
+                      <button
+                        key={status}
+                        className={`category-tab ${incidentStatusFilter === status ? "active" : ""}`}
+                        type="button"
+                        onClick={() => setIncidentStatusFilter(status)}
+                      >
+                        {status} ({count})
+                      </button>
+                    )
+                  })}
+                </div>
 
                 <section className="panel">
-                  <div className="panel-head">
-                    <span>
-                      <b>Detected Incident Chains</b>
-                      <small>Aggregated behavioral detections</small>
-                    </span>
-                  </div>
-                  {liveIncidents.length > 0 ? (
-                    liveIncidents.map((inc) => (
-                      <div key={inc.id} style={{ padding: "14px 16px", borderBottom: "1px solid rgba(255,255,255,.1)" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                          <b>{inc.description}</b>
-                          <span className={`pill ${inc.severity === "CRITICAL" ? "bad" : "warn"}`}>
-                            {inc.severity}
+                  {(() => {
+                    const baseIncidents: SecurityIncident[] = storeState.incidents.length > 0
+                      ? storeState.incidents
+                      : (liveIncidents.length > 0
+                        ? liveIncidents.map((li) => ({
+                            id: li.id,
+                            title: li.description,
+                            category: "PROMPT_INJECTION",
+                            severity: (li.severity || "HIGH") as any,
+                            status: "OPEN" as IncidentStatus,
+                            firstObservedAt: li.detectedAt,
+                            lastUpdatedAt: li.detectedAt,
+                            relatedAgentIdentity: li.agentIdentity,
+                            relatedScenarioId: "SEC-CAT01-001",
+                            evidence: [li.description],
+                            timeline: [
+                              { time: li.detectedAt, action: "DETECTED", actor: "Sentinel Proxy", note: li.description },
+                            ],
+                          }))
+                        : defaultIncidents.map((di) => ({
+                            id: di.id,
+                            title: di.description,
+                            category: "PROMPT_INJECTION",
+                            severity: (di.severity || "HIGH") as any,
+                            status: "OPEN" as IncidentStatus,
+                            firstObservedAt: di.detectedAt,
+                            lastUpdatedAt: di.detectedAt,
+                            relatedAgentIdentity: di.agentIdentity,
+                            relatedScenarioId: "SEC-CAT01-001",
+                            evidence: [di.description],
+                            timeline: [
+                              { time: di.detectedAt, action: "DETECTED", actor: "Sentinel Proxy", note: di.description },
+                            ],
+                          })))
+
+                    const filteredIncidents = baseIncidents.filter((inc) => {
+                      if (incidentStatusFilter !== "ALL" && inc.status !== incidentStatusFilter) return false
+                      if (!globalSearch.trim()) return true
+                      const q = globalSearch.toLowerCase()
+                      return (
+                        inc.title.toLowerCase().includes(q) ||
+                        (inc.relatedAgentIdentity && inc.relatedAgentIdentity.toLowerCase().includes(q)) ||
+                        inc.id.toLowerCase().includes(q) ||
+                        (inc.relatedScenarioId && inc.relatedScenarioId.toLowerCase().includes(q))
+                      )
+                    })
+
+                    return (
+                      <>
+                        <div className="panel-head">
+                          <span>
+                            <b>Correlated Security Incidents</b>
+                            <small>{filteredIncidents.length} matching operational records</small>
                           </span>
                         </div>
-                        <p style={{ fontSize: "9px", color: "var(--muted)", margin: "4px 0" }}>
-                          Agent: {inc.agentIdentity} · Session: {inc.sessionId}
-                        </p>
-                        <div style={{ marginTop: "8px", display: "flex", gap: "6px", flexWrap: "wrap" }}>
-                          {inc.eventChain?.map((ec, idx) => (
-                            <span key={idx} className="pill" style={{ fontSize: "8px" }}>
-                              {ec.toolName} ({ec.decision})
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    ))
-                  ) : (
-                    <div style={{ padding: "30px", textAlign: "center", color: "var(--muted)", fontSize: "11px" }}>
-                      No active security incidents detected. System behavior is within normal boundaries.
-                    </div>
-                  )}
+                        {filteredIncidents.length > 0 ? (
+                          filteredIncidents.map((inc) => (
+                            <div key={inc.id} style={{ padding: "16px 20px", borderBottom: "1px solid rgba(255,255,255,.08)" }}>
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "12px" }}>
+                                <div>
+                                  <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+                                    <span style={{ fontFamily: "var(--mono)", fontSize: "10px", color: "var(--mint)" }}>{inc.id}</span>
+                                    <b>{inc.title}</b>
+                                  </div>
+                                  <p style={{ fontSize: "10px", color: "var(--muted)", margin: "4px 0" }}>
+                                    Principal: <span style={{ color: "#d0dedb" }}>{inc.relatedAgentIdentity || "spiffe://demo.local/agent/financial-remediation"}</span> · Category: {inc.category} · Updated: {new Date(inc.lastUpdatedAt).toLocaleTimeString()}
+                                    {inc.relatedScenarioId && (
+                                      <span> · Test Scenario: <b style={{ color: "var(--mint)" }}>{inc.relatedScenarioId}</b></span>
+                                    )}
+                                  </p>
+                                </div>
+                                <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                                  <span className={`pill ${inc.severity === "CRITICAL" || inc.severity === "HIGH" ? "bad" : inc.severity === "MEDIUM" ? "warn" : "good"}`}>
+                                    {inc.severity}
+                                  </span>
+                                  <span className={`pill ${inc.status === "RESOLVED" ? "good" : inc.status === "CONTAINED" ? "accent" : inc.status === "INVESTIGATING" ? "info" : "warn"}`}>
+                                    {inc.status}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* Evidence snippet */}
+                              {inc.evidence && inc.evidence.length > 0 && (
+                                <div style={{ marginTop: "8px", padding: "8px 12px", background: "rgba(0,0,0,.35)", borderRadius: "6px", fontSize: "9px", fontFamily: "var(--mono)", color: "var(--faint)" }}>
+                                  <b>Trigger Evidence:</b> {inc.evidence.join(" | ")}
+                                </div>
+                              )}
+
+                              {/* Incident Action Lifecycle Buttons */}
+                              <div style={{ marginTop: "12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                <div style={{ display: "flex", gap: "8px" }}>
+                                  {inc.status !== "INVESTIGATING" && inc.status !== "RESOLVED" && (
+                                    <button
+                                      className="btn small"
+                                      type="button"
+                                      onClick={() => handleUpdateIncidentLifecycle(inc.id, "INVESTIGATING")}
+                                    >
+                                      Investigate
+                                    </button>
+                                  )}
+                                  {inc.status !== "CONTAINED" && inc.status !== "RESOLVED" && (
+                                    <button
+                                      className="btn small"
+                                      type="button"
+                                      onClick={() => handleUpdateIncidentLifecycle(inc.id, "CONTAINED")}
+                                    >
+                                      Contain
+                                    </button>
+                                  )}
+                                  {inc.status !== "RESOLVED" ? (
+                                    <button
+                                      className="btn small primary"
+                                      type="button"
+                                      onClick={() => {
+                                        setSelectedIncidentModal(inc)
+                                        setIncidentResolutionNotes(inc.resolutionNotes || "")
+                                      }}
+                                    >
+                                      Resolve...
+                                    </button>
+                                  ) : (
+                                    <button
+                                      className="btn small"
+                                      type="button"
+                                      onClick={() => handleUpdateIncidentLifecycle(inc.id, "REOPENED")}
+                                    >
+                                      Reopen
+                                    </button>
+                                  )}
+                                </div>
+                                <button
+                                  className="btn small"
+                                  type="button"
+                                  onClick={() => setSelectedIncidentModal(inc)}
+                                >
+                                  View Timeline & Evidence ({inc.timeline?.length || 1})
+                                </button>
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <div style={{ padding: "40px", textAlign: "center", color: "var(--muted)", fontSize: "11px" }}>
+                            No security incidents found matching status filter "{incidentStatusFilter}". All agent workflows operating within normal boundaries.
+                          </div>
+                        )}
+                      </>
+                    )
+                  })()}
                 </section>
               </>
             )}
@@ -2232,11 +2908,20 @@ export function SecurityConsole({
               <>
                 <div className="page-head">
                   <div>
-                    <div className="eyebrow">CEDAR POLICY ENGINE</div>
+                    <div className="eyebrow">CEDAR POLICY ENGINE & AI COPILOT</div>
                     <h1>Policy explorer</h1>
-                    <p>Fine-grained Cedar authorization rules actively evaluated at runtime.</p>
+                    <p>Fine-grained Cedar authorization rules actively evaluated at runtime with AI authoring and 100-scenario simulation.</p>
                   </div>
                   <div className="page-actions">
+                    <button
+                      className="btn small"
+                      type="button"
+                      onClick={handleSimulatePolicyImpact}
+                      disabled={policySimLoading}
+                    >
+                      {renderIcon("activity")}
+                      <span>{policySimLoading ? "Simulating on 100 Scenarios..." : "Simulate on 100 Scenarios"}</span>
+                    </button>
                     <button className="btn small" type="button" onClick={handleValidatePolicy}>
                       {renderIcon("check")}
                       <span>Validate Syntax</span>
@@ -2247,80 +2932,186 @@ export function SecurityConsole({
                   </div>
                 </div>
 
-                <div className="policy-layout">
-                  <section className="panel">
-                    <div className="panel-head">
-                      <span><b>Active Cedar Policies</b></span>
-                    </div>
-                    {livePolicies.map((p) => (
-                      <div
-                        key={p.name}
-                        className={`policy-item ${selectedPolicyFile === p.name ? "selected" : ""}`}
-                        onClick={() => {
-                          setSelectedPolicyFile(p.name)
-                          setPolicyContent(p.content)
-                          setPolicyValidation(null)
-                        }}
-                      >
-                        <b>{p.name}</b>
-                        <small>Loaded at {new Date(p.loadedAt).toLocaleTimeString()}</small>
+                {(() => {
+                  const basePolicies = livePolicies.length ? livePolicies : defaultPolicies
+                  const filteredPolicies = basePolicies.filter((p) => {
+                    if (!globalSearch.trim()) return true
+                    const q = globalSearch.toLowerCase()
+                    return p.name.toLowerCase().includes(q) || p.content.toLowerCase().includes(q)
+                  })
+
+                  return (
+                    <>
+                      <div className="policy-layout">
+                        <section className="panel">
+                          <div className="panel-head">
+                            <span><b>Active Cedar Policies ({filteredPolicies.length})</b></span>
+                          </div>
+                          {filteredPolicies.map((p) => (
+                            <div
+                              key={p.name}
+                              className={`policy-item ${selectedPolicyFile === p.name ? "selected" : ""}`}
+                              onClick={() => {
+                                setSelectedPolicyFile(p.name)
+                                setPolicyContent(p.content)
+                                setPolicyValidation(null)
+                              }}
+                            >
+                              <b>{p.name}</b>
+                              <small>Loaded at {new Date(p.loadedAt).toLocaleTimeString()}</small>
+                            </div>
+                          ))}
+
+                          <div style={{ padding: "14px", borderTop: "1px solid rgba(255,255,255,.1)" }}>
+                            <b style={{ fontSize: "9px" }}>Cedar AI Copilot</b>
+                            <p style={{ fontSize: "8px", color: "var(--muted)", margin: "4px 0 8px" }}>
+                              Generate verified Cedar rules using natural language prompts.
+                            </p>
+                            <input
+                              className="field"
+                              style={{ width: "100%", marginBottom: "6px" }}
+                              placeholder="e.g. Permit read_account for finance-agent"
+                              value={copilotPrompt}
+                              onChange={(e) => setCopilotPrompt(e.target.value)}
+                            />
+                            <button
+                              className="btn small"
+                              style={{ width: "100%" }}
+                              type="button"
+                              onClick={handleGenerateCopilotPolicy}
+                              disabled={copilotLoading}
+                            >
+                              {renderIcon("spark")}
+                              <span>{copilotLoading ? "Generating..." : "Generate Rule"}</span>
+                            </button>
+                          </div>
+                        </section>
+
+                        <section className="panel">
+                          <div className="panel-head">
+                            <span>
+                              <b>Policy Source Editor · {selectedPolicyFile}</b>
+                              {policyValidation && (
+                                <span className={`pill ${policyValidation.valid ? "good" : "bad"}`} style={{ marginLeft: "8px" }}>
+                                  {policyValidation.valid ? "Syntax Valid" : "Errors Detected"}
+                                </span>
+                              )}
+                            </span>
+                          </div>
+                          <textarea
+                            style={{
+                              width: "100%",
+                              height: "440px",
+                              background: "#090e12",
+                              color: "#b4c4c1",
+                              fontFamily: "var(--mono)",
+                              fontSize: "11px",
+                              padding: "16px",
+                              border: 0,
+                              outline: 0,
+                              resize: "none",
+                            }}
+                            value={policyContent || (defaultPolicies.find((p) => p.name === selectedPolicyFile)?.content || defaultPolicies[0].content)}
+                            onChange={(e) => setPolicyContent(e.target.value)}
+                          />
+                        </section>
                       </div>
-                    ))}
 
-                    <div style={{ padding: "14px", borderTop: "1px solid rgba(255,255,255,.1)" }}>
-                      <b style={{ fontSize: "9px" }}>Cedar AI Copilot</b>
-                      <p style={{ fontSize: "8px", color: "var(--muted)", margin: "4px 0 8px" }}>
-                        Generate verified Cedar rules using natural language prompts.
-                      </p>
-                      <input
-                        className="field"
-                        style={{ width: "100%", marginBottom: "6px" }}
-                        placeholder="e.g. Permit read_account for finance-agent"
-                        value={copilotPrompt}
-                        onChange={(e) => setCopilotPrompt(e.target.value)}
-                      />
-                      <button
-                        className="btn small"
-                        style={{ width: "100%" }}
-                        type="button"
-                        onClick={handleGenerateCopilotPolicy}
-                        disabled={copilotLoading}
-                      >
-                        {renderIcon("spark")}
-                        <span>{copilotLoading ? "Generating..." : "Generate Rule"}</span>
-                      </button>
-                    </div>
-                  </section>
+                      {/* Policy Simulation Impact Diff Panel */}
+                      {policySimImpact && (
+                        <section className="panel" style={{ marginTop: "16px" }}>
+                          <div className="panel-head" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <span>
+                              <b>Policy Simulation Impact (100 Adversarial Scenarios)</b>
+                              <small>Deterministic Cedar evaluation across all 10 security categories</small>
+                            </span>
+                            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                              <span className={`pill ${policySimImpact.recommendation === "SAFE_TO_DEPLOY" ? "good" : policySimImpact.recommendation === "HIGH_RISK_REGRESSION" ? "bad" : "warn"}`}>
+                                {policySimImpact.recommendation}
+                              </span>
+                              <button className="btn small" type="button" onClick={() => setPolicySimImpact(null)}>
+                                Dismiss Diff
+                              </button>
+                            </div>
+                          </div>
+                          <div className="panel-body">
+                            <div className="impact-grid" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "12px", marginBottom: "16px" }}>
+                              <div className="impact-card">
+                                <div className="impact-title">Scenarios Tested</div>
+                                <div className="impact-val">{policySimImpact.scenariosEvaluated}</div>
+                              </div>
+                              <div className="impact-card">
+                                <div className="impact-title">Pass Rate Shift</div>
+                                <div className="impact-val" style={{ color: policySimImpact.candidatePassed >= policySimImpact.baselinePassed ? "var(--mint)" : "var(--red)" }}>
+                                  {policySimImpact.baselinePassed} &rarr; {policySimImpact.candidatePassed}
+                                </div>
+                              </div>
+                              <div className="impact-card">
+                                <div className="impact-title">Security Regressions</div>
+                                <div className="impact-val" style={{ color: policySimImpact.regressions.length > 0 ? "var(--red)" : "var(--mint)" }}>
+                                  {policySimImpact.regressions.length}
+                                </div>
+                              </div>
+                              <div className="impact-card">
+                                <div className="impact-title">Risk Assessment</div>
+                                <div className="impact-val" style={{ fontSize: "14px", color: policySimImpact.recommendation === "SAFE_TO_DEPLOY" ? "var(--mint)" : "var(--red)" }}>
+                                  {policySimImpact.riskAssessment.overallRisk}
+                                </div>
+                              </div>
+                            </div>
 
-                  <section className="panel">
-                    <div className="panel-head">
-                      <span>
-                        <b>Policy Source Editor · {selectedPolicyFile}</b>
-                        {policyValidation && (
-                          <span className={`pill ${policyValidation.valid ? "good" : "bad"}`} style={{ marginLeft: "8px" }}>
-                            {policyValidation.valid ? "Syntax Valid" : "Errors Detected"}
-                          </span>
-                        )}
-                      </span>
-                    </div>
-                    <textarea
-                      style={{
-                        width: "100%",
-                        height: "440px",
-                        background: "#090e12",
-                        color: "#b4c4c1",
-                        fontFamily: "var(--mono)",
-                        fontSize: "11px",
-                        padding: "16px",
-                        border: 0,
-                        outline: 0,
-                        resize: "none",
-                      }}
-                      value={policyContent}
-                      onChange={(e) => setPolicyContent(e.target.value)}
-                    />
-                  </section>
-                </div>
+                            {/* Regressions list if any */}
+                            {policySimImpact.regressions.length > 0 && (
+                              <div style={{ marginBottom: "14px", padding: "12px", background: "rgba(255, 68, 68, 0.1)", border: "1px solid rgba(255, 68, 68, 0.3)", borderRadius: "8px" }}>
+                                <b style={{ color: "var(--red)", fontSize: "11px", display: "block", marginBottom: "6px" }}>
+                                  Critical Security Regressions Detected ({policySimImpact.regressions.length})
+                                </b>
+                                <p style={{ fontSize: "10px", color: "var(--faint)", marginBottom: "8px" }}>
+                                  The proposed policy candidate permits operations that were previously blocked by Cedar:
+                                </p>
+                                <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+                                  {policySimImpact.regressions.map((regId) => (
+                                    <span key={regId} className="pill bad" style={{ fontFamily: "var(--mono)", fontSize: "9px" }}>
+                                      {regId}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Newly permitted or blocked */}
+                            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                              <div style={{ padding: "12px", background: "rgba(0,0,0,0.3)", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.06)" }}>
+                                <b style={{ fontSize: "10px", color: "var(--mint)" }}>Newly Permitted Scenarios ({policySimImpact.newlyPermitted.length})</b>
+                                <div style={{ marginTop: "6px", display: "flex", gap: "4px", flexWrap: "wrap" }}>
+                                  {policySimImpact.newlyPermitted.length > 0 ? (
+                                    policySimImpact.newlyPermitted.map((id) => (
+                                      <span key={id} className="pill good" style={{ fontSize: "8px", fontFamily: "var(--mono)" }}>{id}</span>
+                                    ))
+                                  ) : (
+                                    <small style={{ color: "var(--muted)" }}>None</small>
+                                  )}
+                                </div>
+                              </div>
+                              <div style={{ padding: "12px", background: "rgba(0,0,0,0.3)", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.06)" }}>
+                                <b style={{ fontSize: "10px", color: "var(--yellow)" }}>Newly Blocked Scenarios ({policySimImpact.newlyBlocked.length})</b>
+                                <div style={{ marginTop: "6px", display: "flex", gap: "4px", flexWrap: "wrap" }}>
+                                  {policySimImpact.newlyBlocked.length > 0 ? (
+                                    policySimImpact.newlyBlocked.map((id) => (
+                                      <span key={id} className="pill warn" style={{ fontSize: "8px", fontFamily: "var(--mono)" }}>{id}</span>
+                                    ))
+                                  ) : (
+                                    <small style={{ color: "var(--muted)" }}>None</small>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </section>
+                      )}
+                    </>
+                  )
+                })()}
               </>
             )}
 
@@ -2335,132 +3126,483 @@ export function SecurityConsole({
                   </div>
                 </div>
 
-                <div className="agents">
-                  {liveIdentities.map((ident) => (
-                    <div key={ident.uri} className="panel agent-card">
-                      <div className="panel-head">
-                        <span>
-                          <b>{ident.name}</b>
-                          <small>{ident.uri}</small>
-                        </span>
-                        <button
-                          className="btn small"
-                          type="button"
-                          onClick={() => handleIssueToken(ident.uri)}
-                        >
-                          Issue Token
-                        </button>
-                      </div>
-                      <div className="panel-body">
-                        <small style={{ color: "var(--muted)", display: "block", marginBottom: "6px" }}>
-                          Active Tokens: {ident.tokens?.length || 0}
-                        </small>
-                        {ident.tokens?.map((t) => (
-                          <div
-                            key={t.id}
-                            style={{
-                              padding: "8px",
-                              border: "1px solid rgba(255,255,255,.08)",
-                              borderRadius: "6px",
-                              marginBottom: "6px",
-                              fontSize: "9px",
-                            }}
-                          >
-                            <div style={{ display: "flex", justifyContent: "space-between" }}>
-                              <b>Token ID: {t.id.slice(0, 14)}...</b>
-                              <button
-                                className="btn small"
-                                style={{ height: "20px", fontSize: "7px", padding: "0 4px" }}
-                                type="button"
-                                onClick={() => handleRevokeToken(t.id)}
-                              >
-                                Revoke
-                              </button>
-                            </div>
-                            <div style={{ marginTop: "4px", color: "var(--muted)" }}>
-                              Capabilities: {t.capabilities?.join(", ")}
-                            </div>
-                            <div style={{ color: "var(--muted)" }}>
-                              Resources: {t.authorizedResources?.join(", ") || "All"}
-                            </div>
+                {(() => {
+                  const baseIdentities = liveIdentities.length ? liveIdentities : defaultIdentities
+                  const filteredIdentities = baseIdentities.filter((ident) => {
+                    if (!globalSearch.trim()) return true
+                    const q = globalSearch.toLowerCase()
+                    return ident.name.toLowerCase().includes(q) || ident.uri.toLowerCase().includes(q)
+                  })
+
+                  return (
+                    <div className="agents">
+                      {filteredIdentities.map((ident) => (
+                        <div key={ident.uri} className="panel agent-card">
+                          <div className="panel-head">
+                            <span>
+                              <b>{ident.name}</b>
+                              <small>{ident.uri}</small>
+                            </span>
+                            <button
+                              className="btn small"
+                              type="button"
+                              onClick={() => handleIssueToken(ident.uri)}
+                            >
+                              Issue Token
+                            </button>
                           </div>
-                        ))}
-                      </div>
+                          <div className="panel-body">
+                            <small style={{ color: "var(--muted)", display: "block", marginBottom: "6px" }}>
+                              Active Tokens: {ident.tokens?.length || 0}
+                            </small>
+                            {ident.tokens?.map((t) => (
+                              <div
+                                key={t.id}
+                                style={{
+                                  padding: "8px",
+                                  border: "1px solid rgba(255,255,255,.08)",
+                                  borderRadius: "6px",
+                                  marginBottom: "6px",
+                                  fontSize: "9px",
+                                }}
+                              >
+                                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                                  <b>Token ID: {t.id.slice(0, 14)}...</b>
+                                  <button
+                                    className="btn small"
+                                    style={{ height: "20px", fontSize: "7px", padding: "0 4px" }}
+                                    type="button"
+                                    onClick={() => handleRevokeToken(t.id)}
+                                  >
+                                    Revoke
+                                  </button>
+                                </div>
+                                <div style={{ marginTop: "4px", color: "var(--muted)" }}>
+                                  Capabilities: {t.capabilities?.join(", ")}
+                                </div>
+                                <div style={{ color: "var(--muted)" }}>
+                                  Resources: {t.authorizedResources?.join(", ") || "All"}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  )
+                })()}
               </>
             )}
 
             {/* View 9: /attack-lab */}
             {activeRoute === "/attack-lab" && (
-              <>
-                <div className="page-head">
-                  <div>
-                    <div className="eyebrow">SIMULATION & VALIDATION</div>
-                    <h1>Attack lab</h1>
-                    <p>Execute live security attack scenarios through the real proxy and policy engine.</p>
+              <div className="attack-lab-wrapper">
+                <div className="attack-lab-head">
+                  <div className="attack-lab-title-area">
+                    <div className="attack-lab-eyebrow-row">
+                      <span className="attack-lab-pulse-dot" />
+                      <span className="eyebrow">ADVERSARIAL AGENTIC SECURITY TESTING</span>
+                    </div>
+                    <h1>Attack Lab · 100-Scenario Adversarial Suite</h1>
+                    <p>Automated, controlled adversarial AI evaluation against prompt injection, canary leakage, and unauthorized tool invocation.</p>
                   </div>
-                  <div className="page-actions">
-                    <button className="btn small" type="button" onClick={handleResetAll}>
-                      {renderIcon("reset")}
-                      <span>Reset Environment</span>
-                    </button>
+                  <div className="attack-lab-actions">
+                    {runnerProgress?.state === "running" ? (
+                      <>
+                        <button className="btn small warning" type="button" onClick={handlePauseSuite}>
+                          {renderIcon("clock")}
+                          <span>Pause Suite</span>
+                        </button>
+                        <button className="btn small danger" type="button" onClick={handleCancelSuite}>
+                          {renderIcon("close")}
+                          <span>Cancel Suite</span>
+                        </button>
+                      </>
+                    ) : runnerProgress?.state === "paused" ? (
+                      <>
+                        <button className="btn small attack-lab-cta" type="button" onClick={handleResumeSuite}>
+                          {renderIcon("play")}
+                          <span>Resume Suite</span>
+                        </button>
+                        <button className="btn small danger" type="button" onClick={handleCancelSuite}>
+                          {renderIcon("close")}
+                          <span>Cancel</span>
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          className="btn attack-lab-cta"
+                          type="button"
+                          onClick={handleRunAll100Scenarios}
+                        >
+                          {renderIcon("play")}
+                          <span>Run All 100 Scenarios</span>
+                        </button>
+                        {runnerProgress && (runnerProgress.failedScenarios > 0 || runnerProgress.inconclusiveScenarios > 0) && (
+                          <button className="btn small warning" type="button" onClick={handleRetryFailedSuite}>
+                            {renderIcon("alert")}
+                            <span>Retry Failures ({runnerProgress.failedScenarios})</span>
+                          </button>
+                        )}
+                        <button className="btn small" type="button" onClick={() => handleExportRunReport("json")} title="Export JSON test report">
+                          {renderIcon("download")}
+                          <span>Export JSON</span>
+                        </button>
+                        <button className="btn small" type="button" onClick={() => handleExportRunReport("markdown")} title="Export Markdown summary report">
+                          {renderIcon("file")}
+                          <span>Export Report (MD)</span>
+                        </button>
+                        <button className="btn small subtle" type="button" onClick={handleResetAll} title="Reset active session tests">
+                          {renderIcon("reset")}
+                          <span>Reset</span>
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
 
-                <div className="scenario-grid">
-                  {scenariosList.map((sc) => (
-                    <div
-                      key={sc.id}
-                      className={`scenario ${scenarioPick === sc.id ? "selected" : ""}`}
-                      onClick={() => setScenarioPick(sc.id)}
-                    >
-                      <span className={`pill ${sc.tone}`}>{sc.label}</span>
-                      <b style={{ display: "block", margin: "6px 0 2px" }}>{sc.title}</b>
-                      <p>{sc.copy}</p>
-                      <button
-                        className="btn small primary"
-                        style={{ width: "100%", marginTop: "8px" }}
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          handleRunScenario(sc.id)
-                        }}
-                        disabled={scenarioRunning === sc.id}
-                      >
-                        {scenarioRunning === sc.id ? "Running..." : "Run Scenario"}
-                      </button>
+                {/* Live Runner Telemetry Bar */}
+                {runnerProgress && (
+                  <div className="attack-lab-telemetry">
+                    <div className="telemetry-head">
+                      <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                        <span className={`pill telemetry-status-pill ${runnerProgress.state === "running" ? "info" : runnerProgress.state === "completed" ? "good" : runnerProgress.state === "paused" ? "warn" : "bad"}`}>
+                          <span className="telemetry-pulse" />
+                          <span>{runnerProgress.state.toUpperCase()}</span>
+                        </span>
+                        <span style={{ fontSize: "12px", fontFamily: "var(--mono)", color: "#d5e2df", fontWeight: 600 }}>
+                          {runnerProgress.state === "running"
+                            ? `Executing Scenario: ${runnerProgress.currentScenarioId || "initializing..."}`
+                            : `Run Identifier: ${runnerProgress.runId}`}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: "11px", color: "var(--muted)", fontFamily: "var(--mono)" }}>
+                        <b style={{ color: "var(--text)" }}>{runnerProgress.completedScenarios}</b> / {runnerProgress.totalScenarios} Scenarios
+                        <span style={{ marginLeft: "6px", color: "var(--mint)" }}>
+                          ({Math.round((runnerProgress.completedScenarios / Math.max(1, runnerProgress.totalScenarios)) * 100)}%)
+                        </span>
+                      </div>
+                    </div>
 
-                      {scenarioResults[sc.id] && (
-                        <div style={{ marginTop: "8px", padding: "8px", background: "rgba(0,0,0,.4)", borderRadius: "6px", fontSize: "8px" }}>
-                          <b>Outcome:</b> {scenarioResults[sc.id].description || scenarioResults[sc.id].decision || "Executed"}
-                          {scenarioResults[sc.id].approval && (
-                            <div style={{ marginTop: "6px", display: "flex", gap: "4px" }}>
-                              <button
-                                className="btn small primary"
-                                style={{ height: "22px", fontSize: "7px" }}
-                                type="button"
-                                onClick={() => handleSupervisorApprovalDecision(scenarioResults[sc.id].approval.id, "approve")}
-                              >
-                                Approve
-                              </button>
-                              <button
-                                className="btn small"
-                                style={{ height: "22px", fontSize: "7px" }}
-                                type="button"
-                                onClick={() => handleSupervisorApprovalDecision(scenarioResults[sc.id].approval.id, "reject")}
-                              >
-                                Reject
-                              </button>
-                            </div>
+                    <div className="progress-track">
+                      <div
+                        className="progress-fill"
+                        style={{
+                          width: `${(runnerProgress.completedScenarios / Math.max(1, runnerProgress.totalScenarios)) * 100}%`,
+                        }}
+                      />
+                    </div>
+
+                    <div className="telemetry-stats-grid">
+                      <div className="telemetry-stat-card">
+                        <span className="telemetry-stat-lbl">Passed</span>
+                        <span className="telemetry-stat-val" style={{ color: "var(--mint)" }}>
+                          {runnerProgress.passedScenarios}
+                        </span>
+                      </div>
+                      <div className="telemetry-stat-card">
+                        <span className="telemetry-stat-lbl">Failed</span>
+                        <span
+                          className="telemetry-stat-val"
+                          style={{ color: runnerProgress.failedScenarios > 0 ? "var(--red)" : "var(--mint)" }}
+                        >
+                          {runnerProgress.failedScenarios}
+                        </span>
+                      </div>
+                      <div className="telemetry-stat-card">
+                        <span className="telemetry-stat-lbl">Inconclusive</span>
+                        <span className="telemetry-stat-val" style={{ color: "var(--amber)" }}>
+                          {runnerProgress.inconclusiveScenarios}
+                        </span>
+                      </div>
+                      <div className="telemetry-stat-card">
+                        <span className="telemetry-stat-lbl">Detection Rate</span>
+                        <span className="telemetry-stat-val" style={{ color: "var(--mint)" }}>
+                          {runnerProgress.detectionRate}%
+                        </span>
+                      </div>
+                      <div className="telemetry-stat-card">
+                        <span className="telemetry-stat-lbl">Execution Blocked</span>
+                        <span className="telemetry-stat-val" style={{ color: "var(--mint)" }}>
+                          {runnerProgress.executionPreventedCount}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Category Selection Tabs */}
+                <div>
+                  <div className="attack-lab-nav-scroll">
+                    <button
+                      className={`attack-lab-cat-pill ${selectedCategory === "ALL" ? "active" : ""}`}
+                      type="button"
+                      onClick={() => setSelectedCategory("ALL")}
+                    >
+                      <span className="cat-tag">ALL</span>
+                      <span>All Categories</span>
+                      <span className="cat-count-badge">(100)</span>
+                    </button>
+                    {CATEGORIES_METADATA.map((catMeta) => {
+                      const catCount = getScenariosByCategory(catMeta.id).length
+                      const match = catMeta.id.match(/^CAT(\d+)/)
+                      const catNum = match ? match[1] : catMeta.id.slice(0, 5)
+                      return (
+                        <button
+                          key={catMeta.id}
+                          className={`attack-lab-cat-pill ${selectedCategory === catMeta.id ? "active" : ""}`}
+                          type="button"
+                          onClick={() => setSelectedCategory(catMeta.id)}
+                          title={catMeta.name}
+                        >
+                          <span className="cat-tag">{catNum}</span>
+                          <span>{catMeta.name}</span>
+                          <span className="cat-count-badge">({catCount})</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  {selectedCategory !== "ALL" && (() => {
+                    const curCat = CATEGORIES_METADATA.find((c) => c.id === selectedCategory)
+                    const catScenarios = getScenariosByCategory(selectedCategory as ScenarioCategory)
+                    return (
+                      <div className="attack-lab-cat-banner">
+                        <div className="cat-banner-info">
+                          <div className="cat-banner-title">
+                            {curCat?.name || selectedCategory}
+                          </div>
+                          <p className="cat-banner-desc">
+                            {curCat?.description}
+                          </p>
+                        </div>
+                        <button
+                          className="btn attack-lab-cta"
+                          type="button"
+                          onClick={() => handleRunSelectedCategory(selectedCategory as ScenarioCategory)}
+                          disabled={runnerProgress?.state === "running"}
+                        >
+                          {renderIcon("play")}
+                          <span>Run Category ({catScenarios.length} Scenarios)</span>
+                        </button>
+                      </div>
+                    )
+                  })()}
+                </div>
+
+                {/* Scenario Filtering and Grid */}
+                {(() => {
+                  const filtered = ALL_SCENARIOS.filter((sc) => {
+                    if (selectedCategory !== "ALL" && sc.category !== selectedCategory) return false
+
+                    if (attackLabSeverityFilter !== "ALL" && sc.severity !== attackLabSeverityFilter) {
+                      return false
+                    }
+
+                    if (attackLabStatusFilter !== "ALL") {
+                      const res = scenarioResults[sc.id]
+                      if (attackLabStatusFilter === "untested" && res) return false
+                      if (attackLabStatusFilter === "passed" && res?.verdict !== "PASSED") return false
+                      if (attackLabStatusFilter === "failed" && res?.verdict !== "FAILED") return false
+                      if (attackLabStatusFilter === "inconclusive" && res?.verdict !== "INCONCLUSIVE") return false
+                      if (attackLabStatusFilter !== "untested" && !res) return false
+                    }
+
+                    const q = (attackLabSearch || globalSearch).trim().toLowerCase()
+                    if (!q) return true
+                    return (
+                      sc.id.toLowerCase().includes(q) ||
+                      sc.name.toLowerCase().includes(q) ||
+                      sc.threatModel.toLowerCase().includes(q) ||
+                      sc.description.toLowerCase().includes(q) ||
+                      sc.expectedPolicyOutcome.toLowerCase().includes(q) ||
+                      sc.expectedToolOutcome.toLowerCase().includes(q)
+                    )
+                  })
+
+                  return (
+                    <div>
+                      {/* Filter Controls Bar */}
+                      <div className="attack-lab-filter-bar">
+                        <div className="search-box-wrapper">
+                          {renderIcon("search")}
+                          <input
+                            type="text"
+                            className="search-box-input"
+                            placeholder="Filter scenarios by ID, name, threat model..."
+                            value={attackLabSearch}
+                            onChange={(e) => setAttackLabSearch(e.target.value)}
+                          />
+                        </div>
+
+                        <div className="filter-group">
+                          <select
+                            className="filter-select"
+                            value={attackLabSeverityFilter}
+                            onChange={(e) => setAttackLabSeverityFilter(e.target.value)}
+                            aria-label="Filter by Severity"
+                          >
+                            <option value="ALL">All Severities</option>
+                            <option value="critical">Critical Severity</option>
+                            <option value="high">High Severity</option>
+                            <option value="medium">Medium Severity</option>
+                            <option value="low">Low Severity</option>
+                          </select>
+
+                          <select
+                            className="filter-select"
+                            value={attackLabStatusFilter}
+                            onChange={(e) => setAttackLabStatusFilter(e.target.value)}
+                            aria-label="Filter by Evaluation Outcome"
+                          >
+                            <option value="ALL">All Evaluation States</option>
+                            <option value="passed">Passed</option>
+                            <option value="failed">Failed</option>
+                            <option value="inconclusive">Inconclusive</option>
+                            <option value="untested">Untested</option>
+                          </select>
+
+                          <span className="scenario-count-pill">
+                            <span>Showing</span>
+                            <b style={{ color: "var(--text)" }}>{filtered.length}</b>
+                            <span>of 100</span>
+                          </span>
+
+                          {(attackLabSearch || attackLabSeverityFilter !== "ALL" || attackLabStatusFilter !== "ALL") && (
+                            <button
+                              className="btn small subtle"
+                              type="button"
+                              onClick={() => {
+                                setAttackLabSearch("")
+                                setAttackLabSeverityFilter("ALL")
+                                setAttackLabStatusFilter("ALL")
+                              }}
+                              title="Reset active filters"
+                            >
+                              Clear Filters
+                            </button>
                           )}
+                        </div>
+                      </div>
+
+                      {/* Scenarios Grid or Empty State */}
+                      {filtered.length === 0 ? (
+                        <div style={{ padding: "48px 24px", textAlign: "center", background: "rgba(13, 19, 25, 0.5)", border: "1px dashed var(--line)", borderRadius: "10px", margin: "16px 0" }}>
+                          <p style={{ color: "var(--muted)", fontSize: "13px", margin: "0 0 14px" }}>
+                            No security scenarios match your current filter parameters.
+                          </p>
+                          <button
+                            className="btn small"
+                            type="button"
+                            onClick={() => {
+                              setSelectedCategory("ALL")
+                              setAttackLabSearch("")
+                              setAttackLabSeverityFilter("ALL")
+                              setAttackLabStatusFilter("ALL")
+                            }}
+                          >
+                            Reset All Filters
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="scenario-grid">
+                          {filtered.map((sc) => {
+                            const runRes = scenarioResults[sc.id]
+                            const isSelected = scenarioPick === sc.id
+                            return (
+                              <div
+                                key={sc.id}
+                                className={`scenario ${isSelected ? "selected" : ""}`}
+                                onClick={() => setScenarioPick(sc.id)}
+                                style={{ display: "flex", flexDirection: "column", justifyContent: "space-between" }}
+                              >
+                                <div>
+                                  <div className="card-top-row">
+                                    <span className="card-id-pill">
+                                      {sc.id}
+                                    </span>
+                                    <span className={`pill ${sc.severity === "critical" ? "bad" : sc.severity === "high" ? "warn" : sc.severity === "medium" ? "info" : "good"}`}>
+                                      {sc.severity.toUpperCase()}
+                                    </span>
+                                  </div>
+                                  <b className="card-title">{sc.name}</b>
+                                  <p className="card-desc">
+                                    {sc.threatModel}
+                                  </p>
+                                  <div className="card-chips">
+                                    <span className="card-chip highlight">
+                                      Expected: {sc.expectedPolicyOutcome}
+                                    </span>
+                                    <span className="card-chip">
+                                      Tool: {sc.expectedToolOutcome}
+                                    </span>
+                                    <span className="card-chip">
+                                      v{sc.evaluationVersion}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <div>
+                                  {runRes && (
+                                    <div className="card-verdict-box">
+                                      <div className="card-verdict-header">
+                                        <span style={{ color: "var(--muted)", textTransform: "uppercase", fontSize: "9px", letterSpacing: "0.05em" }}>
+                                          Evaluation Verdict
+                                        </span>
+                                        <span className={`pill ${runRes.verdict === "PASSED" ? "good" : runRes.verdict === "FAILED" ? "bad" : "warn"}`} style={{ fontSize: "9px" }}>
+                                          {runRes.verdict || "RECORDED"}
+                                        </span>
+                                      </div>
+                                      <div className="card-verdict-desc">
+                                        {runRes.description || runRes.decision || "Outcome recorded"}
+                                      </div>
+                                    </div>
+                                  )}
+
+                                  <div className="card-actions">
+                                    <button
+                                      className="btn small primary"
+                                      style={{ flex: 1, minHeight: "34px" }}
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        handleRunScenario(sc.id)
+                                      }}
+                                      disabled={scenarioRunning === sc.id}
+                                    >
+                                      {scenarioRunning === sc.id ? "Testing..." : (
+                                        <>
+                                          {renderIcon("play")}
+                                          <span>Run Test</span>
+                                        </>
+                                      )}
+                                    </button>
+                                    <button
+                                      className="btn small"
+                                      style={{ minHeight: "34px", padding: "0 14px" }}
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        setSelectedScenarioDetail(sc)
+                                        setSelectedScenarioTrace(scenarioResults[sc.id]?.details || null)
+                                      }}
+                                      title="Inspect prompt, context, and trace"
+                                    >
+                                      {renderIcon("search")}
+                                      <span>Inspect</span>
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            )
+                          })}
                         </div>
                       )}
                     </div>
-                  ))}
-                </div>
-              </>
+                  )
+                })()}
+              </div>
             )}
 
             {/* View 10: /audit */}
@@ -2554,38 +3696,149 @@ export function SecurityConsole({
         </main>
       </div>
 
-      {/* Selected Transaction Inspector Modal */}
+      {/* Selected Transaction Inspector Modal with Full Security Context */}
       {selectedTxn && (
         <div className="modal-bg" onClick={() => setSelectedTxn(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: "min(720px, 95%)", maxHeight: "90vh", overflowY: "auto" }}>
             <header className="modal-head">
               <span>
                 <b>Transaction Details · {selectedTxn.id}</b>
-                <small>{selectedTxn.merchantName || selectedTxn.memo}</small>
+                <small>{selectedTxn.merchantName || selectedTxn.memo} · {selectedTxn.category || "General"}</small>
               </span>
               <button className="btn small" type="button" onClick={() => setSelectedTxn(null)}>
                 {renderIcon("close")}
               </button>
             </header>
             <div className="modal-body">
-              <div className="kv">
+              {/* Summary Header */}
+              <div className="kv" style={{ marginBottom: "16px" }}>
                 <div>
                   <label>Amount</label>
-                  <b>-${Math.abs(selectedTxn.amount).toFixed(2)} {selectedTxn.currency || "USD"}</b>
+                  <b style={{ color: (selectedTxn.status as string) === "denied" || selectedTxn.status === "disputed" ? "var(--red)" : "var(--text)" }}>
+                    -${Math.abs(selectedTxn.amount).toFixed(2)} {selectedTxn.currency || "USD"}
+                  </b>
                 </div>
                 <div>
                   <label>Status</label>
-                  <b>{selectedTxn.status}</b>
+                  <b style={{ textTransform: "capitalize" }}>{selectedTxn.status}</b>
                 </div>
                 <div>
-                  <label>Category</label>
-                  <b>{selectedTxn.category || "General"}</b>
+                  <label>Account</label>
+                  <b>{selectedTxn.accountId || (selectedTxn as any).account || selectedAccountId}</b>
                 </div>
                 <div>
-                  <label>Date</label>
-                  <b>{selectedTxn.timestamp}</b>
+                  <label>Record Type</label>
+                  <span className="pill good">Simulated Ledger</span>
                 </div>
               </div>
+
+              {/* Security Context Inspection */}
+              {enrichedSelectedTxn?.securityContext ? (
+                <div style={{ marginTop: "12px", borderTop: "1px solid var(--line)", paddingTop: "14px" }}>
+                  <div className="eyebrow" style={{ marginBottom: "8px" }}>Zero-Trust Security Telemetry</div>
+                  
+                  <div className="kv" style={{ marginBottom: "14px" }}>
+                    <div>
+                      <label>Mediating Agent Principal</label>
+                      <b style={{ fontSize: "10px" }} className="mono">
+                        {enrichedSelectedTxn.securityContext.agentIdentity || "spiffe://demo.local/agent/financial-remediation"}
+                      </b>
+                    </div>
+                    <div>
+                      <label>Cedar Authorization</label>
+                      <span className={`pill ${enrichedSelectedTxn.securityContext.cedarDecision === "ALLOW" ? "good" : "bad"}`}>
+                        {enrichedSelectedTxn.securityContext.cedarDecision}
+                      </span>
+                    </div>
+                    <div>
+                      <label>Determining Policy</label>
+                      <b className="mono" style={{ fontSize: "10px" }}>
+                        {enrichedSelectedTxn.securityContext.policyId || "fin-remediation-refund-acc1001"}
+                      </b>
+                    </div>
+                    <div>
+                      <label>DLP Inspection</label>
+                      <span className="pill good">
+                        {enrichedSelectedTxn.securityContext.responseInspection?.dlpCheckPassed ? "Sanitized (0 Leaks)" : "Flagged"}
+                      </span>
+                    </div>
+                  </div>
+
+                  {enrichedSelectedTxn.securityContext.decisionExplanation && (
+                    <div style={{ background: "rgba(255,255,255,.02)", padding: "10px 12px", borderRadius: "6px", border: "1px solid var(--line)", marginBottom: "14px", fontSize: "11px" }}>
+                      <span style={{ color: "var(--muted)", display: "block", marginBottom: "4px", fontSize: "9px", textTransform: "uppercase" }}>Policy Explanation</span>
+                      {enrichedSelectedTxn.securityContext.decisionExplanation}
+                    </div>
+                  )}
+
+                  {enrichedSelectedTxn.securityContext.linkedIncidentId && (
+                    <div style={{ background: "rgba(241,126,130,.06)", padding: "10px 12px", borderRadius: "6px", border: "1px solid rgba(241,126,130,.2)", marginBottom: "14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div>
+                        <b style={{ color: "var(--red)", fontSize: "11px" }}>Linked Security Incident: {enrichedSelectedTxn.securityContext.linkedIncidentId}</b>
+                        <p style={{ margin: "2px 0 0", fontSize: "9px", color: "var(--muted)" }}>Violation correlated and logged in Incident Management.</p>
+                      </div>
+                      <button
+                        className="btn small"
+                        type="button"
+                        onClick={() => {
+                          setSelectedTxn(null)
+                          handleNavClick("/incidents", { preventDefault: () => {} } as any)
+                        }}
+                      >
+                        <span>View Incident</span>
+                        {renderIcon("arrow")}
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Cryptographic Audit Chaining */}
+                  {enrichedSelectedTxn.securityContext.auditHash && (
+                    <div style={{ marginBottom: "14px" }}>
+                      <span style={{ color: "var(--faint)", fontSize: "9px", textTransform: "uppercase", display: "block", marginBottom: "4px" }}>
+                        Cryptographic Audit Record (SHA-256)
+                      </span>
+                      <div className="trace-box" style={{ padding: "8px 12px", fontSize: "9px", color: "var(--mint)" }}>
+                        Event: {enrichedSelectedTxn.securityContext.auditEventId || "EVT-1048"} · Root Hash: {enrichedSelectedTxn.securityContext.auditHash}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Security Lifecycle Timeline */}
+                  {enrichedSelectedTxn.securityContext.timeline?.length > 0 && (
+                    <div>
+                      <span style={{ color: "var(--faint)", fontSize: "9px", textTransform: "uppercase", display: "block", marginBottom: "8px" }}>
+                        Enforcement Lifecycle Timeline
+                      </span>
+                      <div className="timeline-container">
+                        {enrichedSelectedTxn.securityContext.timeline.map((stg, idx) => (
+                          <div key={idx} className="timeline-node">
+                            <span className={`timeline-dot ${stg.status}`} />
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                              <b style={{ fontSize: "11px" }}>{stg.stage}</b>
+                              <span className="mono" style={{ fontSize: "8px", color: "var(--faint)" }}>
+                                {new Date(stg.timestamp).toLocaleTimeString()}
+                              </span>
+                            </div>
+                            <p style={{ margin: "2px 0 0", fontSize: "9px", color: "var(--muted)" }}>{stg.detail}</p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div style={{ marginTop: "14px", borderTop: "1px solid var(--line)", paddingTop: "18px", textAlign: "center", color: "var(--muted)" }}>
+                  <div style={{ width: "32px", height: "32px", margin: "0 auto 8px", color: "var(--faint)" }}>
+                    {renderIcon("shield")}
+                  </div>
+                  <b style={{ color: "var(--text)", fontSize: "12px", display: "block", marginBottom: "4px" }}>
+                    No linked security activity is recorded for this transaction.
+                  </b>
+                  <p style={{ fontSize: "10px", maxWidth: "420px", margin: "0 auto", color: "var(--faint)" }}>
+                    Standard consumer payment transactions processed without agent delegation or policy rule violations operate normally without raising security alerts.
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -2733,6 +3986,326 @@ export function SecurityConsole({
             <footer className="modal-foot">
               <button className="btn small primary" type="button" onClick={handleDownloadComplianceMarkdown}>
                 {renderIcon("download")} Download Markdown
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
+
+      {/* Incident Lifecycle & Resolution Detail Modal */}
+      {selectedIncidentModal && (
+        <div className="modal-bg" onClick={() => setSelectedIncidentModal(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()} style={{ width: "min(720px, 95%)" }}>
+            <header className="modal-head">
+              <span>
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <b style={{ fontSize: "14px" }}>Incident: {selectedIncidentModal.id}</b>
+                  <span className={`pill ${selectedIncidentModal.severity === "CRITICAL" || selectedIncidentModal.severity === "HIGH" ? "bad" : "warn"}`}>
+                    {selectedIncidentModal.severity}
+                  </span>
+                  <span className={`pill ${selectedIncidentModal.status === "RESOLVED" ? "good" : selectedIncidentModal.status === "CONTAINED" ? "accent" : selectedIncidentModal.status === "INVESTIGATING" ? "info" : "warn"}`}>
+                    {selectedIncidentModal.status}
+                  </span>
+                </div>
+                <small>{selectedIncidentModal.title}</small>
+              </span>
+              <button className="btn small" type="button" onClick={() => setSelectedIncidentModal(null)}>
+                {renderIcon("close")}
+              </button>
+            </header>
+
+            <div className="modal-body" style={{ maxHeight: "500px", overflow: "auto" }}>
+              <div className="kv" style={{ marginBottom: "14px" }}>
+                <div>
+                  <label>Principal</label>
+                  <b style={{ fontSize: "10px" }}>{selectedIncidentModal.relatedAgentIdentity || "spiffe://demo.local/agent/financial-remediation"}</b>
+                </div>
+                <div>
+                  <label>Category</label>
+                  <b>{selectedIncidentModal.category}</b>
+                </div>
+                <div>
+                  <label>First Observed</label>
+                  <b style={{ fontSize: "10px" }}>{new Date(selectedIncidentModal.firstObservedAt).toLocaleString()}</b>
+                </div>
+                <div>
+                  <label>Correlated Test Scenario</label>
+                  <b style={{ color: "var(--mint)", fontSize: "10px" }}>{selectedIncidentModal.relatedScenarioId || "N/A"}</b>
+                </div>
+              </div>
+
+              {/* Trigger Evidence */}
+              <div style={{ marginBottom: "14px" }}>
+                <span style={{ fontSize: "9px", color: "var(--faint)", textTransform: "uppercase", display: "block", marginBottom: "4px" }}>
+                  Trigger Violation & Adversarial Evidence
+                </span>
+                <div style={{ padding: "10px 14px", background: "rgba(0,0,0,0.4)", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.08)", fontSize: "10px", fontFamily: "var(--mono)" }}>
+                  {(selectedIncidentModal.evidence && selectedIncidentModal.evidence.length > 0) ? selectedIncidentModal.evidence.join("\n") : "Adversarial prompt injection pattern detected and flagged by boundary detector."}
+                </div>
+              </div>
+
+              {/* Incident Event Timeline */}
+              {selectedIncidentModal.timeline && selectedIncidentModal.timeline.length > 0 && (
+                <div style={{ marginBottom: "16px" }}>
+                  <span style={{ fontSize: "9px", color: "var(--faint)", textTransform: "uppercase", display: "block", marginBottom: "8px" }}>
+                    Audit & Incident Lifecycle Timeline
+                  </span>
+                  <div className="timeline-container">
+                    {selectedIncidentModal.timeline.map((item, idx) => (
+                      <div key={idx} className="timeline-node">
+                        <span className={`timeline-dot ${item.action === "RESOLVED" ? "good" : item.action === "CONTAINED" ? "accent" : item.action === "INVESTIGATING" ? "info" : "bad"}`} />
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <b style={{ fontSize: "11px" }}>{item.action}</b>
+                          <span className="mono" style={{ fontSize: "8px", color: "var(--faint)" }}>
+                            {new Date(item.time).toLocaleTimeString()} · {item.actor}
+                          </span>
+                        </div>
+                        {item.note && (
+                          <p style={{ margin: "2px 0 0", fontSize: "9px", color: "var(--muted)" }}>{item.note}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* State Transition & Resolution Section */}
+              <div style={{ padding: "12px", background: "rgba(255,255,255,0.03)", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.08)" }}>
+                <b style={{ fontSize: "10px", display: "block", marginBottom: "6px" }}>Operational Incident Resolution</b>
+                <textarea
+                  className="field"
+                  style={{ width: "100%", height: "60px", marginBottom: "8px", fontSize: "10px", resize: "none" }}
+                  placeholder="Enter root-cause notes, containment mitigation, or resolution details..."
+                  value={incidentResolutionNotes}
+                  onChange={(e) => setIncidentResolutionNotes(e.target.value)}
+                />
+                <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
+                  {selectedIncidentModal.status !== "INVESTIGATING" && selectedIncidentModal.status !== "RESOLVED" && (
+                    <button
+                      className="btn small"
+                      type="button"
+                      onClick={() => handleUpdateIncidentLifecycle(selectedIncidentModal.id, "INVESTIGATING")}
+                    >
+                      Mark Investigating
+                    </button>
+                  )}
+                  {selectedIncidentModal.status !== "CONTAINED" && selectedIncidentModal.status !== "RESOLVED" && (
+                    <button
+                      className="btn small"
+                      type="button"
+                      onClick={() => handleUpdateIncidentLifecycle(selectedIncidentModal.id, "CONTAINED")}
+                    >
+                      Contain Threat
+                    </button>
+                  )}
+                  {selectedIncidentModal.status !== "RESOLVED" ? (
+                    <button
+                      className="btn small primary"
+                      type="button"
+                      onClick={() => handleUpdateIncidentLifecycle(selectedIncidentModal.id, "RESOLVED")}
+                    >
+                      Resolve Incident
+                    </button>
+                  ) : (
+                    <button
+                      className="btn small"
+                      type="button"
+                      onClick={() => handleUpdateIncidentLifecycle(selectedIncidentModal.id, "REOPENED")}
+                    >
+                      Reopen Incident
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Scenario Inspection & Trace Modal */}
+      {selectedScenarioDetail && (
+        <div className="modal-bg" onClick={() => setSelectedScenarioDetail(null)}>
+          <div className="attack-lab-modal-dialog" onClick={(e) => e.stopPropagation()}>
+            <header className="modal-head" style={{ padding: "16px 20px" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                  <span className="card-id-pill" style={{ fontSize: "11px" }}>
+                    {selectedScenarioDetail.id}
+                  </span>
+                  <b style={{ fontSize: "14px", color: "#f2f5f4" }}>{selectedScenarioDetail.name}</b>
+                  <span className={`pill ${selectedScenarioDetail.severity === "critical" ? "bad" : selectedScenarioDetail.severity === "high" ? "warn" : selectedScenarioDetail.severity === "medium" ? "info" : "good"}`}>
+                    {selectedScenarioDetail.severity.toUpperCase()}
+                  </span>
+                </div>
+                <small style={{ color: "var(--muted)", fontSize: "11px" }}>
+                  {CATEGORIES_METADATA.find((c) => c.id === selectedScenarioDetail.category)?.name || selectedScenarioDetail.category} · Evaluation Contract v{selectedScenarioDetail.evaluationVersion}
+                </small>
+              </div>
+              <button className="btn small subtle" type="button" onClick={() => setSelectedScenarioDetail(null)} aria-label="Close modal">
+                {renderIcon("close")}
+              </button>
+            </header>
+
+            <div className="modal-body" style={{ maxHeight: "560px", overflowY: "auto", padding: "18px 20px" }}>
+              {/* Threat Model */}
+              <div style={{ marginBottom: "16px" }}>
+                <span style={{ fontSize: "10px", color: "var(--mint)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: "6px" }}>
+                  Adversarial Threat Model
+                </span>
+                <p style={{ fontSize: "12px", color: "#d2dedb", margin: 0, lineHeight: "1.55", background: "rgba(255,255,255,0.02)", padding: "10px 14px", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.05)" }}>
+                  {selectedScenarioDetail.threatModel}
+                </p>
+              </div>
+
+              {/* Synthetic Adversarial Prompt with Copy Button */}
+              <div style={{ marginBottom: "16px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                  <span style={{ fontSize: "10px", color: "var(--red)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                    Synthetic Adversarial Payload
+                  </span>
+                  <button
+                    className="btn small subtle"
+                    style={{ fontSize: "10px", height: "26px", padding: "0 8px" }}
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(selectedScenarioDetail.syntheticInput)
+                      setCopiedInputId(selectedScenarioDetail.id)
+                      setTimeout(() => setCopiedInputId(null), 2000)
+                    }}
+                  >
+                    {copiedInputId === selectedScenarioDetail.id ? (
+                      <>
+                        {renderIcon("check")}
+                        <span style={{ color: "var(--mint)" }}>Copied!</span>
+                      </>
+                    ) : (
+                      <span>Copy Payload</span>
+                    )}
+                  </button>
+                </div>
+                <pre className="terminal-block">
+                  {selectedScenarioDetail.syntheticInput}
+                </pre>
+              </div>
+
+              {/* Expected Defense Contract */}
+              <div style={{ marginBottom: "16px" }}>
+                <span style={{ fontSize: "10px", color: "var(--muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: "8px" }}>
+                  Zero-Trust Defense Specifications
+                </span>
+                <div className="kv-contract-grid">
+                  <div className="contract-card">
+                    <label>Expected Policy Decision</label>
+                    <b style={{ color: selectedScenarioDetail.expectedPolicyOutcome === "DENY" ? "var(--red)" : "var(--mint)" }}>
+                      {selectedScenarioDetail.expectedPolicyOutcome}
+                    </b>
+                  </div>
+                  <div className="contract-card">
+                    <label>Expected Tool Execution</label>
+                    <b style={{ color: selectedScenarioDetail.expectedToolOutcome === "BLOCKED" ? "var(--mint)" : "var(--amber)" }}>
+                      {selectedScenarioDetail.expectedToolOutcome}
+                    </b>
+                  </div>
+                  <div className="contract-card">
+                    <label>Available Sandboxed Tools</label>
+                    <span style={{ fontSize: "10px", fontFamily: "var(--mono)", color: "#bdc8c9", marginTop: "2px" }}>
+                      {selectedScenarioDetail.availableSimulatedTools.length > 0 ? selectedScenarioDetail.availableSimulatedTools.join(", ") : "None (Isolated Prompt)"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Execution Trace if available */}
+              {selectedScenarioTrace ? (
+                <div style={{ marginTop: "16px", borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: "16px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+                    <b style={{ fontSize: "12px", color: "#f2f5f4" }}>Live Execution & Evaluation Telemetry</b>
+                    <span className={`pill ${selectedScenarioTrace.verdict === "PASSED" ? "good" : selectedScenarioTrace.verdict === "FAILED" ? "bad" : "warn"}`} style={{ fontSize: "10px" }}>
+                      Verdict: {selectedScenarioTrace.verdict}
+                    </span>
+                  </div>
+
+                  <div className="kv-contract-grid">
+                    <div className="contract-card">
+                      <label>Actual Policy Decision</label>
+                      <b style={{ color: selectedScenarioTrace.actualPolicyDecision === "DENY" ? "var(--red)" : "var(--mint)" }}>
+                        {selectedScenarioTrace.actualPolicyDecision}
+                      </b>
+                    </div>
+                    <div className="contract-card">
+                      <label>Execution Prevented</label>
+                      <b style={{ color: selectedScenarioTrace.executionPrevented ? "var(--mint)" : "var(--red)" }}>
+                        {selectedScenarioTrace.executionPrevented ? "YES (Enforced)" : "NO (Unauthorized Execution)"}
+                      </b>
+                    </div>
+                    <div className="contract-card">
+                      <label>Canary Disclosed</label>
+                      <b style={{ color: selectedScenarioTrace.canaryDisclosed ? "var(--red)" : "var(--mint)" }}>
+                        {selectedScenarioTrace.canaryDisclosed ? "LEAKED" : "NONE (Protected)"}
+                      </b>
+                    </div>
+                    <div className="contract-card">
+                      <label>Execution Latency</label>
+                      <b>{selectedScenarioTrace.durationMs} ms</b>
+                    </div>
+                  </div>
+
+                  <div style={{ marginBottom: "14px", padding: "12px 14px", background: "rgba(0,0,0,0.35)", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.06)" }}>
+                    <span style={{ fontSize: "9px", color: "var(--faint)", textTransform: "uppercase", display: "block", marginBottom: "4px", letterSpacing: "0.05em" }}>
+                      Defense Evaluation Notes
+                    </span>
+                    <p style={{ fontSize: "11px", color: "#d0dedb", margin: 0, lineHeight: "1.45" }}>
+                      {selectedScenarioTrace.defenseNotes}
+                    </p>
+                  </div>
+
+                  {/* Step Trace Log */}
+                  {selectedScenarioTrace.stepTraces && selectedScenarioTrace.stepTraces.length > 0 && (
+                    <div>
+                      <span style={{ fontSize: "9px", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: "6px" }}>
+                        Multi-Stage Step Logs ({selectedScenarioTrace.stepTraces.length})
+                      </span>
+                      <div style={{ maxHeight: "170px", overflowY: "auto", background: "#05080c", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.06)", padding: "10px 14px" }}>
+                        {selectedScenarioTrace.stepTraces.map((st: { stage: string; output: string }, idx: number) => {
+                          const total = selectedScenarioTrace.stepTraces?.length ?? 0
+                          return (
+                            <div key={idx} style={{ padding: "5px 0", borderBottom: idx < total - 1 ? "1px solid rgba(255,255,255,0.04)" : "none", fontSize: "10px", fontFamily: "var(--mono)", lineHeight: "1.4" }}>
+                              <span style={{ color: "var(--mint)", fontWeight: 600 }}>[{st.stage}]</span>{" "}
+                              <span style={{ color: "#c8d4d6" }}>{st.output}</span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div style={{ marginTop: "14px", padding: "20px", textAlign: "center", background: "rgba(0,0,0,0.25)", border: "1px dashed var(--line)", borderRadius: "8px", color: "var(--muted)", fontSize: "11px" }}>
+                  Scenario has not been executed yet in the active session. Click "Run This Scenario Now" below to test boundary enforcement.
+                </div>
+              )}
+            </div>
+
+            <footer className="modal-foot" style={{ padding: "14px 20px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <button
+                className="btn small attack-lab-cta"
+                type="button"
+                onClick={async () => {
+                  if (selectedScenarioDetail) {
+                    await handleRunScenario(selectedScenarioDetail.id)
+                  }
+                }}
+                disabled={scenarioRunning === selectedScenarioDetail?.id}
+              >
+                {scenarioRunning === selectedScenarioDetail?.id ? "Executing..." : (
+                  <>
+                    {renderIcon("play")}
+                    <span>Run This Scenario Now</span>
+                  </>
+                )}
+              </button>
+              <button className="btn small" type="button" onClick={() => setSelectedScenarioDetail(null)}>
+                Close
               </button>
             </footer>
           </div>

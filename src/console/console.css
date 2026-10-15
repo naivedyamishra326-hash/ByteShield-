@@ -1120,32 +1120,44 @@
 
 .console-root .scenario-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 14px;
 }
 
 .console-root .scenario {
-  padding: 12px;
-  border: 1px solid #ffffff17;
-  border-radius: 9px;
-  background: #ffffff04;
+  padding: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(13, 19, 25, 0.75);
   cursor: pointer;
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.console-root .scenario:hover {
+  border-color: rgba(130, 227, 194, 0.35);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
 
 .console-root .scenario.selected {
-  border-color: #82e3c27a;
-  background: #82e3c20b;
+  border-color: var(--mint);
+  background: rgba(130, 227, 194, 0.04);
+  box-shadow: 0 0 20px rgba(130, 227, 194, 0.12);
 }
 
 .console-root .scenario b {
-  font-size: 9px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #f2f5f4;
+  line-height: 1.4;
+  display: block;
 }
 
 .console-root .scenario p {
-  font-size: 8px;
-  line-height: 1.6;
+  font-size: 11px;
+  line-height: 1.5;
   color: var(--muted);
-  min-height: 36px;
+  min-height: 34px;
 }
 
 .console-root .result {
@@ -1368,3 +1380,703 @@
     width: 100%;
   }
 }
+
+/* ============================================================
+   ByteShield — Advanced Testing & Lifecycle Styles
+   ============================================================ */
+
+.console-root .runner-banner {
+  background: linear-gradient(135deg, rgba(13, 19, 25, 0.95), rgba(23, 33, 41, 0.85));
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-bottom: 20px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.console-root .progress-track {
+  width: 100%;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 99px;
+  overflow: hidden;
+  margin: 10px 0 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.console-root .progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--mint), #6be3b9);
+  border-radius: 99px;
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 0 12px rgba(130, 227, 194, 0.4);
+}
+
+.console-root .category-tabs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+  margin-bottom: 16px;
+  scrollbar-width: thin;
+}
+
+.console-root .category-tab-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 99px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: 0.15s;
+}
+
+.console-root .category-tab-btn:hover {
+  border-color: #506068;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.console-root .category-tab-btn.active {
+  background: rgba(130, 227, 194, 0.12);
+  border-color: var(--mint);
+  color: var(--mint);
+}
+
+.console-root .timeline-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  position: relative;
+  padding-left: 20px;
+  margin: 14px 0;
+}
+
+.console-root .timeline-container::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  background: var(--line);
+}
+
+.console-root .timeline-node {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.console-root .timeline-dot {
+  position: absolute;
+  left: -20px;
+  top: 3px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--bg);
+}
+
+.console-root .timeline-dot.success {
+  background: var(--mint);
+  box-shadow: 0 0 8px rgba(130, 227, 194, 0.5);
+}
+
+.console-root .timeline-dot.warning {
+  background: var(--amber);
+  box-shadow: 0 0 8px rgba(240, 199, 130, 0.5);
+}
+
+.console-root .timeline-dot.error {
+  background: var(--red);
+  box-shadow: 0 0 8px rgba(241, 126, 130, 0.5);
+}
+
+.console-root .trace-box {
+  background: #06090d;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: #c0ced6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.console-root .impact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.console-root .impact-card {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+/* ============================================================
+   ByteShield — Attack Lab UI/UX Refinement Styles
+   ============================================================ */
+
+.console-root .attack-lab-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  width: 100%;
+}
+
+.console-root .attack-lab-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  padding-bottom: 4px;
+}
+
+.console-root .attack-lab-title-area {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 720px;
+}
+
+.console-root .attack-lab-eyebrow-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.console-root .attack-lab-pulse-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--mint);
+  box-shadow: 0 0 8px rgba(130, 227, 194, 0.6);
+  animation: pulse-glow 2s infinite ease-in-out;
+}
+
+@keyframes pulse-glow {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+    box-shadow: 0 0 8px rgba(130, 227, 194, 0.6);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.85);
+    box-shadow: 0 0 2px rgba(130, 227, 194, 0.2);
+  }
+}
+
+.console-root .attack-lab-head h1 {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #f2f5f4;
+  line-height: 1.25;
+  margin: 2px 0 4px;
+}
+
+.console-root .attack-lab-head p {
+  font-size: 12px;
+  color: #8fa2a8;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.console-root .attack-lab-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.console-root .btn.attack-lab-cta {
+  background: var(--mint);
+  border-color: var(--mint);
+  color: #081a14;
+  font-weight: 700;
+  font-size: 11px;
+  min-height: 36px;
+  padding: 0 16px;
+  box-shadow: 0 0 18px rgba(130, 227, 194, 0.25);
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.console-root .btn.attack-lab-cta:hover {
+  background: #a3edd5;
+  border-color: #a3edd5;
+  box-shadow: 0 0 24px rgba(130, 227, 194, 0.45);
+  transform: translateY(-1px);
+}
+
+.console-root .btn.danger {
+  border-color: rgba(241, 126, 130, 0.45);
+  color: var(--red);
+  background: rgba(241, 126, 130, 0.08);
+}
+
+.console-root .btn.danger:hover {
+  border-color: var(--red);
+  background: rgba(241, 126, 130, 0.18);
+  box-shadow: 0 0 14px rgba(241, 126, 130, 0.3);
+}
+
+.console-root .btn.warning {
+  border-color: rgba(240, 199, 130, 0.45);
+  color: var(--amber);
+  background: rgba(240, 199, 130, 0.08);
+}
+
+.console-root .btn.warning:hover {
+  border-color: var(--amber);
+  background: rgba(240, 199, 130, 0.18);
+}
+
+/* Telemetry Command Bar */
+.console-root .attack-lab-telemetry {
+  background: linear-gradient(180deg, rgba(17, 25, 32, 0.92) 0%, rgba(13, 19, 25, 0.96) 100%);
+  border: 1px solid rgba(130, 227, 194, 0.16);
+  border-radius: 12px;
+  padding: 18px 20px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  position: relative;
+  overflow: hidden;
+}
+
+.console-root .attack-lab-telemetry::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--mint), transparent);
+  opacity: 0.6;
+}
+
+.console-root .telemetry-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.console-root .telemetry-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.console-root .telemetry-pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pulse-glow 1.5s infinite ease-in-out;
+}
+
+.console-root .telemetry-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.console-root .telemetry-stat-card {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.console-root .telemetry-stat-lbl {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.console-root .telemetry-stat-val {
+  font-size: 18px;
+  font-weight: 700;
+  font-family: var(--mono);
+  line-height: 1.2;
+}
+
+/* Category Filter Bar & Navigation */
+.console-root .attack-lab-nav-scroll {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 4px 2px 10px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+}
+
+.console-root .attack-lab-nav-scroll::-webkit-scrollbar {
+  height: 4px;
+}
+
+.console-root .attack-lab-nav-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+}
+
+.console-root .attack-lab-cat-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.console-root .attack-lab-cat-pill:hover {
+  border-color: #506068;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.console-root .attack-lab-cat-pill.active {
+  background: rgba(130, 227, 194, 0.1);
+  border-color: var(--mint);
+  color: #f2f5f4;
+  box-shadow: 0 0 16px rgba(130, 227, 194, 0.15);
+}
+
+.console-root .cat-tag {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #ccd6d9;
+}
+
+.console-root .attack-lab-cat-pill.active .cat-tag {
+  background: var(--mint);
+  color: #092019;
+}
+
+.console-root .cat-count-badge {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--faint);
+}
+
+.console-root .attack-lab-cat-pill.active .cat-count-badge {
+  color: var(--mint);
+}
+
+/* Category Detail Banner */
+.console-root .attack-lab-cat-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 18px;
+  background: rgba(17, 25, 32, 0.8);
+  border: 1px solid rgba(130, 227, 194, 0.18);
+  border-radius: 10px;
+  margin-top: 8px;
+}
+
+.console-root .cat-banner-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.console-root .cat-banner-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--mint);
+  letter-spacing: -0.01em;
+}
+
+.console-root .cat-banner-desc {
+  font-size: 11px;
+  color: #a4b4bc;
+  line-height: 1.45;
+  margin: 0;
+}
+
+/* Quick Filters Bar */
+.console-root .attack-lab-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  background: rgba(13, 19, 25, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+}
+
+.console-root .filter-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.console-root .search-box-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 260px;
+}
+
+.console-root .search-box-wrapper .ico {
+  position: absolute;
+  left: 10px;
+  color: var(--faint);
+  pointer-events: none;
+  width: 14px;
+  height: 14px;
+}
+
+.console-root .search-box-input {
+  width: 100%;
+  height: 34px;
+  padding: 0 12px 0 32px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  font-size: 11px;
+  transition: border-color 0.15s ease;
+}
+
+.console-root .search-box-input:focus {
+  outline: none;
+  border-color: var(--mint);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.console-root .filter-select {
+  height: 34px;
+  padding: 0 10px;
+  background: #0d1319;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.console-root .filter-select:focus {
+  outline: none;
+  border-color: var(--mint);
+}
+
+.console-root .scenario-count-pill {
+  font-size: 11px;
+  font-family: var(--mono);
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Card Improvements */
+.console-root .card-top-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.console-root .card-id-pill {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--mint);
+  background: rgba(130, 227, 194, 0.08);
+  border: 1px solid rgba(130, 227, 194, 0.2);
+  padding: 3px 7px;
+  border-radius: 5px;
+}
+
+.console-root .card-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.console-root .card-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  font-size: 9px;
+  font-family: var(--mono);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #bdc8c9;
+}
+
+.console-root .card-chip.highlight {
+  border-color: rgba(130, 227, 194, 0.25);
+  color: var(--mint);
+}
+
+.console-root .card-verdict-box {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: rgba(8, 12, 16, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+}
+
+.console-root .card-verdict-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+  font-size: 10px;
+}
+
+.console-root .card-verdict-desc {
+  font-size: 10px;
+  color: #9db0b8;
+  line-height: 1.45;
+}
+
+.console-root .card-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* Modal Polish */
+.console-root .attack-lab-modal-dialog {
+  width: min(840px, 94%);
+  max-height: 90vh;
+  background: #0d1319;
+  border: 1px solid rgba(130, 227, 194, 0.22);
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.7);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.console-root .terminal-block {
+  background: #05080c;
+  border: 1px solid rgba(241, 126, 130, 0.22);
+  border-radius: 8px;
+  padding: 12px 14px;
+  color: #fca5a5;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.console-root .kv-contract-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.console-root .contract-card {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.console-root .contract-card label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.console-root .contract-card b {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* Responsive Media Queries for Attack Lab */
+@media (max-width: 1024px) {
+  .console-root .attack-lab-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .console-root .attack-lab-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .console-root .telemetry-stats-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .console-root .scenario-grid {
+    grid-template-columns: 1fr;
+  }
+  .console-root .telemetry-stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .console-root .attack-lab-cat-banner {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .console-root .attack-lab-filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .console-root .search-box-wrapper {
+    min-width: 100%;
+  }
+  .console-root .filter-group {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
+

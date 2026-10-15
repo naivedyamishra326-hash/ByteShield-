@@ -27,13 +27,18 @@ async function fetchJSON<T>(path: string, options?: RequestInit): Promise<T> {
   const timeoutId = setTimeout(() => controller.abort(), 12000)
 
   try {
+    const headers: Record<string, string> = {
+      Accept: "application/json",
+      ...(options?.headers as Record<string, string>),
+    }
+    if (options?.body) {
+      headers["Content-Type"] = "application/json"
+    }
+
     const res = await fetch(url, {
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
       signal: controller.signal,
       ...options,
+      headers,
     })
 
     if (!res.ok) {
@@ -266,7 +271,7 @@ export const api = {
       },
     ),
 
-  // Attack Lab Simulations
+  // Attack Lab Simulations & 100-Scenario Runner
   simulate: (scenario: string) =>
     fetchJSON<{
       scenarioId: string
@@ -285,6 +290,22 @@ export const api = {
   resetAll: () => fetchJSON<{ success: boolean }>("/reset", {
     method: "POST",
   }),
+
+  // Dynamic Incident Management Lifecycle
+  updateIncidentStatus: (
+    id: string,
+    status: "OPEN" | "INVESTIGATING" | "CONTAINED" | "RESOLVED" | "REOPENED",
+    notes?: string,
+  ) =>
+    fetchJSON<{ success: boolean; incident: any }>(`/incidents/${id}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status, notes }),
+    }).catch(() => {
+      // Local security store fallback
+      const { defaultSecurityStore } = require("../services/securityStore")
+      const updated = defaultSecurityStore.updateIncidentStatus(id, status, "operator@byteshield.local", notes)
+      return { success: updated, incident: defaultSecurityStore.getState().incidents.find((i: any) => i.id === id) }
+    }),
 }
 
 // Server-Sent Events (SSE) subscriber
