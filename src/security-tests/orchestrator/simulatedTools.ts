@@ -100,7 +100,7 @@ export class SimulatedToolSandbox {
 
       case "issue_refund": {
         const targetAcc = args.accountId || context.accountId
-        const amount = Number(args.amount) || 0
+        const amount = Number(args.amount) || 8
         const acc = this.accounts[targetAcc]
         if (acc) {
           acc.balance += amount
